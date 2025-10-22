@@ -11,6 +11,8 @@ tabulate = "*"
 torch = "*"
 pandas-stubs = "*"
 scikit-learn = "*"
+ipykernel = "*"
+matplotlib = "*"
 
 [dev-packages]
 
