@@ -2,12 +2,16 @@
 pipenv run pip install .
 
 Create venv with python 3.9
+```
 pipenv --python /usr/bin/python3
+```
 
 Code lines that were changed are tagged with "# CHANGED"
 
 Analyzes the asset/customer profitability over time:
+```
 python3 run_dataset_analysis.py FAR-Trans-Data output
+```
 
 positional:
 1. interactions       → transactions.csv
@@ -26,8 +30,12 @@ positional:
 
 
 For all recommendations:
+```
 python3 run_recommendation.py Far-Trans-Data results
+```
 
 Run specific time recommendation
-python3 recommendation.py Far-Trans-Data prices range 2019-08-01 2021-02-26 28 13 results 6 rfr 
+```
+python3 recommendation.py Far-Trans-Data prices range 2019-08-01 2021-02-26 28 13 results 6 rfr
+```
 
