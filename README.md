@@ -8,7 +8,7 @@ pipenv --python /usr/bin/python3
 
 Code lines that were changed are tagged with "# CHANGED"
 
-Analyzes the asset/customer profitability over time:
+Analyzes the asset/customer profitability over time (not needed for recommendation):
 ```
 python3 run_dataset_analysis.py FAR-Trans-Data output
 ```

@@ -14,6 +14,8 @@ scikit-learn = "*"
 ipykernel = "*"
 matplotlib = "*"
 dice-ml = "*"
+skl2onnx = "*"
+onnxruntime = "*"
 
 [dev-packages]
 

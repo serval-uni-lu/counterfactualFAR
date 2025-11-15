@@ -8,9 +8,12 @@
 #  If a copy of the MPL was not distributed with this  file, you can obtain one at
 #  http://mozilla.org/MPL/2.0/.
 
+import os
+
 import datetime
 import random
-
+from skl2onnx import convert_sklearn
+from skl2onnx.common.data_types import FloatTensorType
 import pandas as pd
 from utils.constants import DEFAULT_TIMESTAMP_COL, DEFAULT_ITEM_COL, DEFAULT_USER_COL, DEFAULT_RATING_COL
 
@@ -39,7 +42,7 @@ class ProfitabilityPrediction(Algorithm):
         self.model = model
         self.train_examples_per_asset = train_examples_per_asset
         self.is_fitted = False
-
+    
     def train(self, train_date):
         # This is the maximum training date. Meaning that no future information is considered here.
         # Considering this:
@@ -68,9 +71,29 @@ class ProfitabilityPrediction(Algorithm):
         goals = kpi_indicators["target"]
         kpi_indicators = kpi_indicators[self.indicators]
 
-        if kpi_indicators.shape[0] > 0:
+        if kpi_indicators.shape[0] > 0:  # CHANGED
             self.model.fit(kpi_indicators, goals)
             self.is_fitted = True
+
+            os.makedirs("for_testing", exist_ok=True)
+        
+            # Combine features + target into one dataframe
+            training_data = kpi_indicators.copy()
+            training_data["target"] = goals
+            # Save to CSV
+            training_data.to_csv(f"for_testing/training_data_{train_date}.csv", index=False)
+            self.save_fitted_model(train_date)
+
+
+    def save_fitted_model(self, train_date): # ADDED
+        if self.is_fitted:
+            initial_type = [('float_input', FloatTensorType([None, len(self.indicators)]))]
+            onnx_model = convert_sklearn(self.model, initial_types=initial_type)
+            with open(f"for_testing/profitability_recommendation_{train_date}.onnx", "wb") as f:
+                f.write(onnx_model.SerializeToString())
+        else:
+            raise Exception("Model is not fitted yet. Cannot save an untrained model.")
+        
 
     def recommend(self, rec_time, repeated, only_test_customers):
         fields = [x for x in self.indicators]
@@ -83,12 +106,17 @@ class ProfitabilityPrediction(Algorithm):
         kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_TIMESTAMP_COL] == rec_time]
         kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_ITEM_COL].isin(self.data.assets)]
 
+        test_data=kpi_indicators.copy()
+        test_data.to_csv(f"for_testing/test_data_{rec_time}.csv", index=False)
+
         # Then, we obtain the recommendation scores:
 
         if self.is_fitted:
             kpi_indicators["score"] = self.model.predict(kpi_indicators.drop(columns=[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]))
         else:
             kpi_indicators["score"] = kpi_indicators[DEFAULT_ITEM_COL].apply(lambda x: random.random())
+
+        kpi_indicators.to_csv(f"for_testing/prediction_{rec_time}.csv", index=False)
 
         # And, finally, we sort the assets by score:
         kpi_indicators = kpi_indicators[[DEFAULT_ITEM_COL, "score"]].sort_values(by="score", ascending=False)

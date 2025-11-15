@@ -113,12 +113,12 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
     for metric in eval_metrics:
         print("Started metric " + metric[0] + " for " + file)
 
-        print(metric[1])
+        #print(metric[1])
         metric_dict = metric[1].evaluate_cutoffs(recs, cutoffs, customers, True)
-        print(metric_dict)
+        #print(metric_dict)
         for cutoff in cutoffs:
             metric_name = metric[0] + "@" + str(cutoff)
-            print(metric_name)
+            #print(metric_name)
             metric_res[metric_name] = metric_dict[cutoff]
         time_elapsed = dt.datetime.now() - timeaa
         print("Computed metric " + metric[0] + " for algorithm " + file + " (" + '{}'.format(time_elapsed) + ")")
@@ -128,6 +128,12 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
 
     # Output the metrics:
     f = open(file + "_metrics.csv", "w")
+    for key, val in metric_res.items():
+        f.write(key + "\t" + str(val[1]) + "\n")
+    f.close()
+
+    # Output the metrics:
+    f = open(f"for_testing/lastwindow_metrics_{recomm_date}.csv", "w")
     for key, val in metric_res.items():
         f.write(key + "\t" + str(val[1]) + "\n")
     f.close()
@@ -427,52 +433,53 @@ if __name__ == "__main__":
 
     print(len(def_dates))
     for i in range(0, len(def_dates)):
-        rec_date = def_dates[i]
-        future_date = def_future_dates[i]
-        min_split_date = rec_date - delta
+        if i == len(def_dates) - 1: # SAVE LAST WINDOW (TRAINED) MODEL
+            rec_date = def_dates[i]
+            future_date = def_future_dates[i]
+            min_split_date = rec_date - delta
 
-        alg_name = def_name[i] + "_" + rec_date.strftime("%Y-%m-%d")
-        # We only generate recommendations for those dates on which we have not previously generated
-        # the recommendations.
-        if os.path.exists(os.path.join(directory, alg_name)):
-            print("Skipped " + alg_name + " as it already exists")
-            continue
+            alg_name = def_name[i] + "_" + rec_date.strftime("%Y-%m-%d")
+            # We only generate recommendations for those dates on which we have not previously generated
+            # the recommendations.
+            if os.path.exists(os.path.join(directory, alg_name)):
+                print("Skipped " + alg_name + " as it already exists")
+                continue
 
-        # Get the corresponding file names:
-        splitted_data = data.split(min_split_date, rec_date, future_date,
-                                DataFilter(CustomerInTrain(), AssetWithTestPrice(), RatingsNotInTrain(),
-                                            NoFilter(), False, True, False))
+            # Get the corresponding file names:
+            splitted_data = data.split(min_split_date, rec_date, future_date,
+                                    DataFilter(CustomerInTrain(), AssetWithTestPrice(), RatingsNotInTrain(),
+                                                NoFilter(), False, True, False))
 
-        timeb = dt.datetime.now() - timea
-        print("Dataset splitted (" + '{}'.format(timeb) + ")")
+            timeb = dt.datetime.now() - timea
+            print("Dataset splitted (" + '{}'.format(timeb) + ")")
 
-        # We compute the profitability and volatility.
-        profitability_df = compute_profitability(splitted_data.time_series, rec_date, future_date, None)
-        volatility_df = compute_volatility(splitted_data.time_series, rec_date, future_date)
+            # We compute the profitability and volatility.
+            profitability_df = compute_profitability(splitted_data.time_series, rec_date, future_date, None)
+            volatility_df = compute_volatility(splitted_data.time_series, rec_date, future_date)
 
-        # Define the metrics
-        metrics = [
-            ("profitability", KPIEvaluationMetric(splitted_data, profitability_df)),
-            ("annualized_prof", AnnualizedKPIEvaluationMetric(splitted_data, profitability_df,
+            # Define the metrics
+            metrics = [
+                ("profitability", KPIEvaluationMetric(splitted_data, profitability_df)),
+                ("annualized_prof", AnnualizedKPIEvaluationMetric(splitted_data, profitability_df,
+                                                                (future_date - rec_date).days)),
+                ("monthly_prof", MonthlyKPIEvaluationMetric(splitted_data, profitability_df,
                                                             (future_date - rec_date).days)),
-            ("monthly_prof", MonthlyKPIEvaluationMetric(splitted_data, profitability_df,
-                                                        (future_date - rec_date).days)),
-            ("volatility", KPIEvaluationMetric(splitted_data, volatility_df)),
-            ("ndcg", PureNDCG(splitted_data))]
+                ("volatility", KPIEvaluationMetric(splitted_data, volatility_df)),
+                ("ndcg", PureNDCG(splitted_data))]
 
-        # Now, we choose metrics:
-        print("Executing algorithm: " + model + " Start date: " + str(rec_date) + " End date: " + str(future_date))
-        # Next: we get the algorithm and the parameters:
-        
-        if len(params) < 2:
-            sys.stderr.write("ERROR: Invalid arguments for random forest")
-            sys.stderr.write("\tn: Number of regression trees.")
-            sys.stderr.write("\tfull: whether to use the full set of technical indicators or just three of them.")
-            exit(-1)
-        proc = Process(target=regressor, args=(params, splitted_data, rec_date, metrics, directory, alg_name,
-                                            months_term))
-        procs.append(proc)
-        proc.start()
+            # Now, we choose metrics:
+            print("Executing algorithm: " + model + " Start date: " + str(rec_date) + " End date: " + str(future_date))
+            # Next: we get the algorithm and the parameters:
+            
+            if len(params) < 2:
+                sys.stderr.write("ERROR: Invalid arguments for random forest")
+                sys.stderr.write("\tn: Number of regression trees.")
+                sys.stderr.write("\tfull: whether to use the full set of technical indicators or just three of them.")
+                exit(-1)
+            proc = Process(target=regressor, args=(params, splitted_data, rec_date, metrics, directory, alg_name,
+                                                months_term))
+            procs.append(proc)
+            proc.start()
 
     if len(procs) > 0:
         for proc in procs:

@@ -208,7 +208,9 @@ __marimo__/
 
 # Cache
 .DS_Store
+.vscode
 
 # Results files
 results
 output
+for_testing
