@@ -100,7 +100,7 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
     print("Algorithm " + file + " trained (" + '{}'.format(time_elapsed) + ")")
 
     # 2. Generate the recommendations:
-    recs = algorithm.recommend(recomm_date, False, True)
+    recs = algorithm.recommend(recomm_date, customers, False, True)
     recs = recs.sort_values(by=[DEFAULT_USER_COL, DEFAULT_RATING_COL], ascending=[False, False])
     recs.to_csv(file + "_recs.txt", index=False)
     time_elapsed = dt.datetime.now() - timea

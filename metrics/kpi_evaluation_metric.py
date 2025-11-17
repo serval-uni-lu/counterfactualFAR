@@ -39,12 +39,10 @@ class KPIEvaluationMetric(Metric):
         aux_recs = recs[recs[DEFAULT_USER_COL].isin(customers)]
         aux_recs.groupby(DEFAULT_USER_COL).head(cutoff)
 
-        ''' use cutoff @10.
-        To avoid requiring extra information on the target customers, 
-        we should assume that all customers are being evaluated. 
-        '''
+        # For each user: average return of their top-K recommendations
         aux_recs["metric"] = aux_recs[DEFAULT_ITEM_COL].apply(lambda x: self.values[x])
         aux_recs = aux_recs.groupby(DEFAULT_USER_COL).mean()
+        # Average across all users
         aggregated = aux_recs["metric"].sum() / (0.0 + len(customers))
 
         return aux_recs.reset_index()[[DEFAULT_USER_COL, "metric"]], aggregated

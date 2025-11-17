@@ -95,7 +95,7 @@ class ProfitabilityPrediction(Algorithm):
             raise Exception("Model is not fitted yet. Cannot save an untrained model.")
         
 
-    def recommend(self, rec_time, repeated, only_test_customers):
+    def recommend(self, rec_time, target_custs, repeated, only_test_customers):
         fields = [x for x in self.indicators]
         fields.append(DEFAULT_ITEM_COL)
         fields.append(DEFAULT_TIMESTAMP_COL)
@@ -134,6 +134,7 @@ class ProfitabilityPrediction(Algorithm):
         user_recommendations = []
         user_recs_full = []
         customers = (self.data.users & set(self.data.test[DEFAULT_USER_COL].unique().flatten())) if only_test_customers else self.data.users
+        customers = customers & target_custs
 
         for customer in customers:
             user_recommendation = kpi_indicators.copy()
