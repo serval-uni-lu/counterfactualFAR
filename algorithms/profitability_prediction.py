@@ -106,8 +106,8 @@ class ProfitabilityPrediction(Algorithm):
         kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_TIMESTAMP_COL] == rec_time]
         kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_ITEM_COL].isin(self.data.assets)]
 
-        test_data=kpi_indicators.copy()
-        test_data.to_csv(f"for_testing/test_data_{rec_time}.csv", index=False)
+        # test_data=kpi_indicators.copy()
+        # test_data.to_csv(f"for_testing/test_data_{rec_time}.csv", index=False)
 
         # Then, we obtain the recommendation scores:
 
@@ -116,21 +116,39 @@ class ProfitabilityPrediction(Algorithm):
         else:
             kpi_indicators["score"] = kpi_indicators[DEFAULT_ITEM_COL].apply(lambda x: random.random())
 
-        kpi_indicators.to_csv(f"for_testing/prediction_{rec_time}.csv", index=False)
+        # kpi_indicators.to_csv(f"for_testing/prediction_{rec_time}.csv", index=False)
 
         # And, finally, we sort the assets by score:
-        kpi_indicators = kpi_indicators[[DEFAULT_ITEM_COL, "score"]].sort_values(by="score", ascending=False)
-        kpi_indicators = kpi_indicators.rename(columns={"score": DEFAULT_RATING_COL})
+        kpi_indicators_full = (
+            kpi_indicators
+            .sort_values(by="score", ascending=False)
+            .rename(columns={"score": DEFAULT_RATING_COL})
+        )
+
+        kpi_indicators = (
+            kpi_indicators[[DEFAULT_ITEM_COL, "score"]]
+            .sort_values(by="score", ascending=False)
+            .rename(columns={"score": DEFAULT_RATING_COL})
+        )
 
         user_recommendations = []
+        user_recs_full = []
         customers = (self.data.users & set(self.data.test[DEFAULT_USER_COL].unique().flatten())) if only_test_customers else self.data.users
 
         for customer in customers:
             user_recommendation = kpi_indicators.copy()
+            user_recommendation_full = kpi_indicators_full.copy()
             user_recommendation[DEFAULT_USER_COL] = customer
+            user_recommendation_full[DEFAULT_USER_COL] = customer
 
             if not repeated:
                 items_per_user = set(self.data.train[self.data.train[DEFAULT_USER_COL] == customer][DEFAULT_ITEM_COL].unique().flatten())
                 user_recommendation = user_recommendation[~user_recommendation[DEFAULT_ITEM_COL].isin(items_per_user)]
+                user_recommendation_full = user_recommendation_full[~user_recommendation_full[DEFAULT_ITEM_COL].isin(items_per_user)]
             user_recommendations.append(user_recommendation)
+            user_recs_full.append(user_recommendation_full)
+        
+        user_recs_full = pd.concat(user_recs_full)
+        user_recs_full.to_csv(f"for_testing/testing_data_{rec_time}.csv", index=False)
+
         return pd.concat(user_recommendations)
