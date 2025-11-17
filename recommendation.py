@@ -106,7 +106,6 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
     time_elapsed = dt.datetime.now() - timea
 
     print("Generated recommendations for algorithm " + file + " (" + '{}'.format(time_elapsed) + ")")
-
     # 3. Compute the metrics:
     cutoffs = [1, 5, 10, 20, 50, 100, 1000]
     metric_res = dict()
@@ -132,11 +131,6 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
         f.write(key + "\t" + str(val[1]) + "\n")
     f.close()
 
-    # Output the metrics:
-    f = open(f"for_testing/lastwindow_metrics_{recomm_date}.csv", "w")
-    for key, val in metric_res.items():
-        f.write(key + "\t" + str(val[1]) + "\n")
-    f.close()
 
     cust_metric_df = None
     # Output the metrics by customer
