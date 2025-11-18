@@ -112,12 +112,9 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
     for metric in eval_metrics:
         print("Started metric " + metric[0] + " for " + file)
 
-        #print(metric[1])
         metric_dict = metric[1].evaluate_cutoffs(recs, cutoffs, customers, True)
-        #print(metric_dict)
         for cutoff in cutoffs:
             metric_name = metric[0] + "@" + str(cutoff)
-            #print(metric_name)
             metric_res[metric_name] = metric_dict[cutoff]
         time_elapsed = dt.datetime.now() - timeaa
         print("Computed metric " + metric[0] + " for algorithm " + file + " (" + '{}'.format(time_elapsed) + ")")
