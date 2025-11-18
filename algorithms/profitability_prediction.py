@@ -63,8 +63,9 @@ class ProfitabilityPrediction(Algorithm):
         kpi_indicators = pd.concat(asset_dfs)
 
         # Finally, we filter the indicators by date.
-        kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]
-        kpi_indicators_test = kpi_indicators[kpi_indicators[DEFAULT_TIMESTAMP_COL] >= (train_date - delta)]
+        full = kpi_indicators.copy()
+        kpi_indicators = full[full[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]
+        kpi_indicators_test = full[full[DEFAULT_TIMESTAMP_COL] >= (train_date - delta)]
         
         aux_list = self.indicators.copy()
         aux_list.append("target")
@@ -79,8 +80,6 @@ class ProfitabilityPrediction(Algorithm):
         kpi_indicators_test = kpi_indicators_test.dropna()
         goals_test = kpi_indicators_test["target"]
         kpi_indicators_test = kpi_indicators_test[self.indicators]
-        #kpi_indicators_test = kpi_indicators_test[kpi_indicators_test[DEFAULT_TIMESTAMP_COL] == train_date]
-        #kpi_indicators_test = kpi_indicators_test[kpi_indicators_test[DEFAULT_ITEM_COL].isin(self.data.assets)]
 
         if kpi_indicators.shape[0] > 0:  # CHANGED
             self.model.fit(kpi_indicators, goals)
@@ -96,7 +95,7 @@ class ProfitabilityPrediction(Algorithm):
             testing_data["target"] = goals_test
             # Save to CSV
             training_data.to_csv(f"for_testing/training_data_{train_date}.csv", index=False)
-            training_data.to_csv(f"for_testing/testing_data_{train_date}.csv", index=False)
+            testing_data.to_csv(f"for_testing/testing_data_{train_date}.csv", index=False)
             self.save_fitted_model(train_date)
 
 
@@ -120,11 +119,8 @@ class ProfitabilityPrediction(Algorithm):
 
         kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_TIMESTAMP_COL] == rec_time]
         kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_ITEM_COL].isin(self.data.assets)]
-        # test_data=kpi_indicators.copy()
-        # test_data.to_csv(f"for_testing/test_data_{rec_time}.csv", index=False)
 
         # Then, we obtain the recommendation scores:
-
         if self.is_fitted:
             kpi_indicators["score"] = self.model.predict(kpi_indicators.drop(columns=[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]))
         else:
