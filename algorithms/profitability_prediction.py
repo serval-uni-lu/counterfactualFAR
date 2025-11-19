@@ -51,7 +51,6 @@ class ProfitabilityPrediction(Algorithm):
         # As a first step, we find the technical indicators. We use all the possible information previous
         # to the training date - the number of months we are considering.
         kpi_indicators = self.kpis[self.kpis[DEFAULT_ITEM_COL].isin(self.data.assets)]
-
         # For each asset, we get the target (profitability at k months)
         asset_dfs = []
         for asset in kpi_indicators[DEFAULT_ITEM_COL].unique():
@@ -66,7 +65,7 @@ class ProfitabilityPrediction(Algorithm):
         full = kpi_indicators.copy()
         kpi_indicators = full[full[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]
         kpi_indicators_test = full[full[DEFAULT_TIMESTAMP_COL] >= (train_date - delta)]
-        
+
         aux_list = self.indicators.copy()
         aux_list.append("target")
         kpi_indicators = kpi_indicators[aux_list]
@@ -76,10 +75,9 @@ class ProfitabilityPrediction(Algorithm):
 
         aux_list_test = self.indicators.copy()
         aux_list_test.append("target")
+        aux_list_test.append("col_timestamp")
         kpi_indicators_test = kpi_indicators_test[aux_list_test]
         kpi_indicators_test = kpi_indicators_test.dropna()
-        goals_test = kpi_indicators_test["target"]
-        kpi_indicators_test = kpi_indicators_test[self.indicators]
 
         if kpi_indicators.shape[0] > 0:  # CHANGED
             self.model.fit(kpi_indicators, goals)
@@ -91,11 +89,9 @@ class ProfitabilityPrediction(Algorithm):
             training_data = kpi_indicators.copy()
             training_data["target"] = goals
 
-            testing_data = kpi_indicators_test.copy()
-            testing_data["target"] = goals_test
             # Save to CSV
             training_data.to_csv(f"for_testing/training_data_{train_date}.csv", index=False)
-            testing_data.to_csv(f"for_testing/testing_data_{train_date}.csv", index=False)
+            kpi_indicators_test.to_csv(f"for_testing/testing_data_{train_date}.csv", index=False)
             self.save_fitted_model(train_date)
 
 
@@ -126,8 +122,6 @@ class ProfitabilityPrediction(Algorithm):
         else:
             kpi_indicators["score"] = kpi_indicators[DEFAULT_ITEM_COL].apply(lambda x: random.random())
 
-        # kpi_indicators.to_csv(f"for_testing/prediction_{rec_time}.csv", index=False)
-
         # And, finally, we sort the assets by score:
         kpi_indicators_full = (
             kpi_indicators
@@ -139,13 +133,14 @@ class ProfitabilityPrediction(Algorithm):
             kpi_indicators[[DEFAULT_ITEM_COL, "score"]]
             .sort_values(by="score", ascending=False)
             .rename(columns={"score": DEFAULT_RATING_COL})
-        )
+        ) # number of items at rec_time
 
         user_recommendations = []
         user_recs_full = []
         customers = (self.data.users & set(self.data.test[DEFAULT_USER_COL].unique().flatten())) if only_test_customers else self.data.users
         customers = customers & target_custs
 
+        # num_rows = num_customers × num_items_available_at_rec_time
         for customer in customers:
             user_recommendation = kpi_indicators.copy()
             user_recommendation_full = kpi_indicators_full.copy()
