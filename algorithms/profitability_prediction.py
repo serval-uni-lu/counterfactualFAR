@@ -43,7 +43,7 @@ class ProfitabilityPrediction(Algorithm):
         self.train_examples_per_asset = train_examples_per_asset
         self.is_fitted = False
     
-    def train(self, train_date):
+    def train(self, train_date): # CHANGED
         # This is the maximum training date. Meaning that no future information is considered here.
         # Considering this:
         delta = datetime.timedelta(days=self.months * 30)
@@ -68,10 +68,17 @@ class ProfitabilityPrediction(Algorithm):
 
         aux_list = self.indicators.copy()
         aux_list.append("target")
+        aux_list.append("col_timestamp")
         kpi_indicators = kpi_indicators[aux_list]
         kpi_indicators = kpi_indicators.dropna()
         goals = kpi_indicators["target"]
+        timestamp = kpi_indicators["col_timestamp"]
         kpi_indicators = kpi_indicators[self.indicators]
+
+        # Combine features + target into one dataframe
+        training_data = kpi_indicators.copy()
+        training_data["target"] = goals
+        training_data["col_timestamp"] = timestamp
 
         aux_list_test = self.indicators.copy()
         aux_list_test.append("target")
@@ -85,10 +92,6 @@ class ProfitabilityPrediction(Algorithm):
 
             os.makedirs("for_testing", exist_ok=True)
         
-            # Combine features + target into one dataframe
-            training_data = kpi_indicators.copy()
-            training_data["target"] = goals
-
             # Save to CSV
             training_data.to_csv(f"for_testing/training_data_{train_date}.csv", index=False)
             kpi_indicators_test.to_csv(f"for_testing/testing_data_{train_date}.csv", index=False)
