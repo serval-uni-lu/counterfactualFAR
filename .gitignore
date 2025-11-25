@@ -209,6 +209,7 @@ __marimo__/
 # Cache
 .DS_Store
 .vscode
+mypy.ini
 
 # Results files
 results
