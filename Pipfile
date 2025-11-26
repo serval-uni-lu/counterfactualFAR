@@ -13,9 +13,10 @@ pandas-stubs = "*"
 scikit-learn = "*"
 ipykernel = "*"
 matplotlib = "*"
-dice-ml = "*"
 skl2onnx = "*"
 onnxruntime = "*"
+dice-ml = "*"
+termcolor = "*"
 
 [dev-packages]
 
