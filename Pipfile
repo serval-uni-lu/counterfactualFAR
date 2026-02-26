@@ -8,7 +8,6 @@ numpy = "*"
 pandas = "*"
 scipy = "*"
 tabulate = "*"
-torch = "*"
 pandas-stubs = "*"
 scikit-learn = "*"
 ipykernel = "*"
@@ -17,6 +16,8 @@ skl2onnx = "*"
 onnxruntime = "*"
 dice-ml = "*"
 termcolor = "*"
+torch = "==2.3.0"
+pytorch-tabnet = "*"
 
 [dev-packages]
 
