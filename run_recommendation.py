@@ -32,6 +32,8 @@ if __name__ == "__main__":
         sys.stderr.write("ERROR: Invalid arguments")
         sys.stderr.write("\tdataset_path: route to the dataset.")
         sys.stderr.write("\toutput_dir: directory on which to store the results.")
+        sys.stderr.write("\t(optional) model: rfr|mlp|tabnet")
+        sys.stderr.write("\t(optional) model params: rfr -> <n_estimators> <kpi_type>; mlp -> <hidden_sizes> [kpi_type]; tabnet -> [kpi_type]")
 
     dataset_path = sys.argv[1]
     output_directory = sys.argv[2]
@@ -44,36 +46,57 @@ if __name__ == "__main__":
     dates = [("2019-08-01", "2021-02-26", "28", "13", "6", output_directory),
             ("2020-09-14", "2022-05-23", "31", "13", "6", output_directory)]
 
-    # Only run the RFR model
-rfr_config = ("rfr", "rfr", "20", "full_short")
+    # Default model config
+    model_config = ("rfr", "rfr", "20", "full_short")
 
-for date in dates:
-    print("Starting", rfr_config[0], "for time horizon of", date[4], "month(s)")
+    if len(sys.argv) >= 4:
+        model_id = sys.argv[3]
+        model_params = sys.argv[4:]
+        if model_id == "rfr":
+            if model_params:
+                model_config = ("rfr", "rfr", *model_params)
+            else:
+                model_config = ("rfr", "rfr", "20", "full_short")
+        elif model_id == "mlp":
+            if model_params:
+                model_config = ("mlp", "mlp", *model_params)
+            else:
+                model_config = ("mlp", "mlp", "256,128,64", "full_short")
+        elif model_id == "tabnet":
+            if model_params:
+                model_config = ("tabnet", "tabnet", *model_params)
+            else:
+                model_config = ("tabnet", "tabnet", "full_short")
+        else:
+            sys.exit("ERROR: model must be 'rfr', 'mlp' or 'tabnet'")
 
-    directory = os.path.join(date[5], rfr_config[1])
-    os.makedirs(directory, exist_ok=True)
+    for date in dates:
+        print("Starting", model_config[0], "for time horizon of", date[4], "month(s)")
 
-    # Build command
-    exec_code = [
-        "python3", "./recommendation.py",
-        interactions_file,
-        time_series,
-        "range",         # date_format choice
-        date[0],         # min_date
-        date[1],         # max_date
-        date[2],         # num_splits
-        date[3],         # num_future
-        directory,       # output_dir
-        date[4],         # months
-        rfr_config[0],   # model identifier
-    ]
+        directory = os.path.join(date[5], model_config[1])
+        os.makedirs(directory, exist_ok=True)
 
-    # Add model parameters
-    exec_code.extend(rfr_config[2:])  # -> ["20", "full_short"]
+        # Build command
+        exec_code = [
+            "python3", "./recommendation.py",
+            interactions_file,
+            time_series,
+            "range",         # date_format choice
+            date[0],         # min_date
+            date[1],         # max_date
+            date[2],         # num_splits
+            date[3],         # num_future
+            directory,       # output_dir
+            date[4],         # months
+            model_config[0], # model identifier
+        ]
 
-    # Convert list to string
-    final_cmd = " ".join(exec_code)
+        # Add model parameters
+        exec_code.extend(model_config[2:])
 
-    print("Executing:", final_cmd)
-    if os.system(final_cmd) != 0:
-        sys.exit(f"Error when executing {rfr_config[0]} for date {date}")
+        # Convert list to string
+        final_cmd = " ".join(exec_code)
+
+        print("Executing:", final_cmd)
+        if os.system(final_cmd) != 0:
+            sys.exit(f"Error when executing {model_config[0]} for date {date}")

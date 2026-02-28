@@ -22,8 +22,15 @@ import pandas as pd
 from utils.constants import DEFAULT_TIMESTAMP_COL, DEFAULT_ITEM_COL, DEFAULT_RATING_COL, DEFAULT_USER_COL
 from sklearn.ensemble import RandomForestRegressor
 
+try:
+    pd.set_option("future.infer_string", False)
+except Exception:
+    pass
+
 from algorithms.kpi_gen.load_kpi_generator import LoadKPIGenerator
 from algorithms.kpi_gen.ma_kpi_generator import MAKPIGenerator
+from algorithms.mlp_kpi_model import MLPKPIModel
+from algorithms.tabnet_kpi_model import TabNetKPIModel
 from algorithms.profitability_prediction import ProfitabilityPrediction
 from data.filter.asset.asset_with_test_price import AssetWithTestPrice
 from data.filter.customer.customer_in_train import CustomerInTrain
@@ -76,6 +83,103 @@ full_short_kpis = ["past_profitability_21d", "past_profitability_63d", "past_pro
 
 # Regression
 RFR = "rfr"
+MLP = "mlp"
+TABNET = "tabnet"
+MLP_KPI_TYPES = {"full", "basic", "basic_short", "full_short"}
+TABNET_ALLOWED_KEYS = {"kpi", "kpi_type", "n_d", "n_a", "n_steps"}
+
+
+def _parse_mlp_params(params):
+    hidden_sizes = [256, 128, 64]
+    kpi_type = "full_short"
+
+    if not params:
+        return hidden_sizes, kpi_type
+
+    hidden_tokens = []
+
+    for raw in params:
+        token = str(raw).strip()
+        if token == "":
+            continue
+
+        token_lower = token.lower()
+        if token_lower in MLP_KPI_TYPES:
+            kpi_type = token_lower
+            continue
+
+        if token_lower.startswith("kpi="):
+            value = token_lower.split("=", 1)[1].strip()
+            if value in MLP_KPI_TYPES:
+                kpi_type = value
+            continue
+
+        cleaned = token.replace("[", "").replace("]", "")
+        pieces = [p.strip() for p in cleaned.split(",") if p.strip() != ""]
+        if not pieces:
+            continue
+
+        if all(piece.lstrip("+-").isdigit() for piece in pieces):
+            hidden_tokens.extend(pieces)
+
+    if hidden_tokens:
+        hidden_sizes = [int(x) for x in hidden_tokens]
+
+    return hidden_sizes, kpi_type
+
+
+def _parse_tabnet_params(params):
+    config = {
+        "kpi_type": "full_short",
+        "n_d": 16,
+        "n_a": 16,
+        "n_steps": 4,
+    }
+
+    if not params:
+        return config
+
+    positional = []
+    for raw in params:
+        token = str(raw).strip()
+        if token == "":
+            continue
+
+        token_lower = token.lower()
+        if token_lower in MLP_KPI_TYPES:
+            config["kpi_type"] = token_lower
+            continue
+
+        if "=" in token:
+            key, value = token.split("=", 1)
+            key = key.strip().lower()
+            value = value.strip()
+            if key not in TABNET_ALLOWED_KEYS:
+                continue
+            if key in {"kpi", "kpi_type"} and value.lower() in MLP_KPI_TYPES:
+                config["kpi_type"] = value.lower()
+            elif key in {"n_d", "n_a", "n_steps"}:
+                if value.lstrip("+-").isdigit():
+                    config[key] = int(value)
+            continue
+
+        positional.append(token)
+
+    numeric = []
+    for token in positional:
+        try:
+            numeric.append(float(token))
+        except ValueError:
+            pass
+
+    if len(numeric) >= 1:
+        config["n_d"] = int(numeric[0])
+    if len(numeric) >= 2:
+        config["n_a"] = int(numeric[1])
+    if len(numeric) >= 3:
+        config["n_steps"] = int(numeric[2])
+
+    return config
 
 
 def test(algorithm, eval_metrics, file, recomm_date, customers):
@@ -88,7 +192,7 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
     :param recomm_date: the date of the recommendation.
     :param customers: the set of customers to use.
     """
-    if os.path.exists(file):
+    if os.path.exists(file + "_metrics.csv"):
         return
 
     timeaa = dt.datetime.now()
@@ -143,7 +247,8 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
     print("Algorithm " + file + " finished (" + '{}'.format(time_elapsed) + ")")
 
 
-def regressor(param, financial_data, recommendation_date, eval_metrics, output_dir, file, num_months):
+def regressor(model_id, param, financial_data, recommendation_date, eval_metrics, output_dir, file, num_months,
+              save_for_testing=False):
     """
     Configures and runs regression models (predict future profitability of stocks, and rank them according to that
     prediction).
@@ -158,23 +263,60 @@ def regressor(param, financial_data, recommendation_date, eval_metrics, output_d
     alg_model = None
     full = False
     
-    n = int(param[0])
-    full = param[1]
-    
-    alg_model = RandomForestRegressor(n_estimators=n)
+    # Parse parameters
+    kpi_type = "full_short"
+    hidden_sizes = None
+    tabnet_cfg = None
 
-    if full == "full":
+    if model_id == RFR:
+        n = int(param[0]) if len(param) >= 1 else 20
+        kpi_type = param[1] if len(param) >= 2 else "full_short"
+    elif model_id == MLP:
+        hidden_sizes, kpi_type = _parse_mlp_params(param)
+    elif model_id == TABNET:
+        tabnet_cfg = _parse_tabnet_params(param)
+        kpi_type = tabnet_cfg["kpi_type"]
+    
+    # Determine features based on kpi_type
+    if kpi_type == "full":
         feats = full_kpis
-    elif full == "basic":
+    elif kpi_type == "basic":
         feats = basic_kpis
-    elif full == "basic_short":
+    elif kpi_type == "basic_short":
         feats = basic_short_kpis
     else:
-        # if full == "full_short":
+        # if kpi_type == "full_short":
         feats = full_short_kpis
-    algorithm = ProfitabilityPrediction(alg_model, financial_data, num_months, feats, -1)
+    
+    if model_id == RFR:
+        alg_model = RandomForestRegressor(n_estimators=n, random_state=42)
+    elif model_id == MLP:
+        # Create MLP model (KPI generation happens inside the model)
+        alg_model = MLPKPIModel(
+            hidden_sizes=hidden_sizes,
+            k=5,
+            kpi_type=kpi_type,
+            kpi_features=feats,
+            seed=42,
+        )
+    else:
+        if tabnet_cfg is None:
+            tabnet_cfg = _parse_tabnet_params(param)
+        alg_model = TabNetKPIModel(
+            k=5,
+            kpi_type=tabnet_cfg["kpi_type"],
+            kpi_features=feats,
+            n_d=tabnet_cfg["n_d"],
+            n_a=tabnet_cfg["n_a"],
+            n_steps=tabnet_cfg["n_steps"],
+            auto_tune=False,
+        )
+
+    algorithm = ProfitabilityPrediction(alg_model, financial_data, num_months, feats, -1,
+                                        save_for_testing=save_for_testing)
     file_name = os.path.join(output_dir, file)
     test(algorithm, eval_metrics, file_name, recommendation_date, financial_data.users)
+
 
 
 
@@ -190,12 +332,37 @@ def get_name(rec_model, param):
 
     algorithm_name = None
     
-    if len(param) >= 2:
-        n = int(param[0])
-        full = param[1]
-        algorithm_name = RFR + "_" + str(n) + "_" + full
+    if rec_model == MLP:
+        hidden_sizes, kpi_type = _parse_mlp_params(param)
+        hidden_sizes_str = ",".join(str(x) for x in hidden_sizes)
+        algorithm_name = MLP + "_" + hidden_sizes_str + "_" + kpi_type
+    elif rec_model == TABNET:
+        tabnet_cfg = _parse_tabnet_params(param)
+        algorithm_name = (
+            TABNET
+            + "_"
+            + tabnet_cfg["kpi_type"]
+            + "_nd"
+            + str(tabnet_cfg["n_d"])
+            + "_na"
+            + str(tabnet_cfg["n_a"])
+            + "_ns"
+            + str(tabnet_cfg["n_steps"])
+        )
+    else:
+        # For backward compatibility with RFR
+        if len(param) >= 2:
+            n = int(param[0])
+            full = param[1]
+            algorithm_name = RFR + "_" + str(n) + "_" + full
+        elif len(param) >= 1:
+            n = int(param[0])
+            algorithm_name = RFR + "_" + str(n) + "_full_short"
+        else:
+            algorithm_name = RFR + "_20_full_short"
 
     return algorithm_name
+
 
 
 def compute_profitability(time_series, recommendation_date, evaluation_date, min_values):
@@ -301,7 +468,7 @@ if __name__ == "__main__":
     parser_range.add_argument("num_future", help='Number of dates to look formward', type=int)
     parser_range.add_argument("output_dir", help="directory on which to store the outputs.")
     parser_range.add_argument("months", help="number of months to look into the future.")
-    parser_range.add_argument("model", help="model identifier", choices=[RFR])
+    parser_range.add_argument("model", help="model identifier", choices=[RFR, MLP, TABNET])
     parser_range.add_argument("params", help="model parameters", action="store", nargs="*")
 
     parser_fixed = subparsers.add_parser('fixed_dates', help='List of fixed dates to use. This mode provides fixed '
@@ -310,7 +477,7 @@ if __name__ == "__main__":
     parser_fixed.add_argument('future_dates', help='Comma separated list of test end dates. Date format: %Y-%m-%d')
     parser_fixed.add_argument("output_dir", help="directory on which to store the outputs.")
     parser_fixed.add_argument("months", help="number of months to look into the future.")
-    parser_fixed.add_argument("model", help="model identifier", choices=[RFR])
+    parser_fixed.add_argument("model", help="model identifier", choices=[RFR, MLP, TABNET])
     parser_fixed.add_argument("params", help="model parameters", action="store", nargs="*")
 
     args = parser.parse_args()
@@ -348,6 +515,15 @@ if __name__ == "__main__":
     directory = args.output_dir
     months_term = args.months
     model = args.model
+    params = args.params
+
+    selected_kpi_type = "full_short"
+    if model == RFR and len(params) >= 2:
+        selected_kpi_type = params[1]
+    elif model == MLP:
+        _, selected_kpi_type = _parse_mlp_params(params)
+    elif model == TABNET:
+        selected_kpi_type = _parse_tabnet_params(params)["kpi_type"]
 
     # If the number of days is 0 for the delta, we choose as minimum date one in the distant past
     # (36525 days is exactly 100 years before the established date)
@@ -359,29 +535,29 @@ if __name__ == "__main__":
     # First, load the data.
     data = FinancialContinuousData(interaction_data, time_series_data)
     data.load()
-
     timeb = dt.datetime.now() - timea
     print("Dataset loaded (" + '{}'.format(timeb) + ")")
 
-    # Compute the technical indicators
-    kpi_file = os.path.join(directory, "kpis.csv")
-    print(kpi_file)
-    kpi_type = "full_short"
+    # Compute the technical indicators (required for Random Forest)
+    if model == RFR:
+        kpi_file = os.path.join(directory, f"kpis_{selected_kpi_type}.csv")
+        kpi_type = selected_kpi_type
 
-    if os.path.exists(kpi_file):
-        kpi_gen = LoadKPIGenerator(kpi_file)
-    else:
-        kpi_gen = MAKPIGenerator(data.time_series.data, 5, kpi_type)
-    kpi_gen.compute()
-    kpis = kpi_gen.get_kpis()
+        if os.path.exists(kpi_file):
+            kpi_gen = LoadKPIGenerator(kpi_file)
+        else:
+            kpi_gen = MAKPIGenerator(data.time_series.data, 5, kpi_type)
 
-    if not os.path.exists(kpi_file):
-        kpi_gen.print_kpis(kpi_file)
+        kpi_gen.compute()
+        kpis = kpi_gen.get_kpis()
 
-    data.add_kpis(kpis)
+        if not os.path.exists(kpi_file):
+            kpi_gen.print_kpis(kpi_file)
 
-    timeb = dt.datetime.now() - timea
-    print("Technical indicators computed (" + '{}'.format(timeb) + ")")
+        data.add_kpis(kpis)
+
+        timeb = dt.datetime.now() - timea
+        print("Technical indicators computed (" + '{}'.format(timeb) + ")")
 
     dates = []
     future_dates = []
@@ -406,7 +582,6 @@ if __name__ == "__main__":
     def_future_dates = []
     def_name = []
 
-    params = args.params
     semaphore = Semaphore(4)
 
     # We first check the selected model is good.
@@ -424,53 +599,48 @@ if __name__ == "__main__":
 
     print(len(def_dates))
     for i in range(0, len(def_dates)):
-        if i == len(def_dates) - 1: # SAVE LAST WINDOW (TRAINED) MODEL
-            rec_date = def_dates[i]
-            future_date = def_future_dates[i]
-            min_split_date = rec_date - delta
+        rec_date = def_dates[i]
+        future_date = def_future_dates[i]
+        min_split_date = rec_date - delta
+        save_for_testing = i == len(def_dates) - 1
 
-            alg_name = def_name[i] + "_" + rec_date.strftime("%Y-%m-%d")
-            # We only generate recommendations for those dates on which we have not previously generated
-            # the recommendations.
-            if os.path.exists(os.path.join(directory, alg_name)):
-                print("Skipped " + alg_name + " as it already exists")
-                continue
+        alg_name = def_name[i] + "_" + rec_date.strftime("%Y-%m-%d")
+        # We only generate recommendations for those dates on which we have not previously generated
+        # the recommendations.
+        if os.path.exists(os.path.join(directory, alg_name + "_metrics.csv")):
+            print("Skipped " + alg_name + " as it already exists")
+            continue
 
-            # Get the corresponding file names:
-            splitted_data = data.split(min_split_date, rec_date, future_date,
-                                    DataFilter(CustomerInTrain(), AssetWithTestPrice(), RatingsNotInTrain(),
-                                                NoFilter(), False, True, False))
+        # Get the corresponding file names:
+        splitted_data = data.split(min_split_date, rec_date, future_date,
+                                DataFilter(CustomerInTrain(), AssetWithTestPrice(), RatingsNotInTrain(),
+                                            NoFilter(), False, True, False))
 
-            timeb = dt.datetime.now() - timea
-            print("Dataset splitted (" + '{}'.format(timeb) + ")")
+        timeb = dt.datetime.now() - timea
+        print("Dataset splitted (" + '{}'.format(timeb) + ")")
 
-            # We compute the profitability and volatility.
-            profitability_df = compute_profitability(splitted_data.time_series, rec_date, future_date, None)
-            volatility_df = compute_volatility(splitted_data.time_series, rec_date, future_date)
+        # We compute the profitability and volatility.
+        profitability_df = compute_profitability(splitted_data.time_series, rec_date, future_date, None)
+        volatility_df = compute_volatility(splitted_data.time_series, rec_date, future_date)
 
-            # Define the metrics
-            metrics = [
-                ("profitability", KPIEvaluationMetric(splitted_data, profitability_df)),
-                ("annualized_prof", AnnualizedKPIEvaluationMetric(splitted_data, profitability_df,
-                                                                (future_date - rec_date).days)),
-                ("monthly_prof", MonthlyKPIEvaluationMetric(splitted_data, profitability_df,
+        # Define the metrics
+        metrics = [
+            ("profitability", KPIEvaluationMetric(splitted_data, profitability_df)),
+            ("annualized_prof", AnnualizedKPIEvaluationMetric(splitted_data, profitability_df,
                                                             (future_date - rec_date).days)),
-                ("volatility", KPIEvaluationMetric(splitted_data, volatility_df)),
-                ("ndcg", PureNDCG(splitted_data))]
+            ("monthly_prof", MonthlyKPIEvaluationMetric(splitted_data, profitability_df,
+                                                        (future_date - rec_date).days)),
+            ("volatility", KPIEvaluationMetric(splitted_data, volatility_df)),
+            ("ndcg", PureNDCG(splitted_data))]
 
-            # Now, we choose metrics:
-            print("Executing algorithm: " + model + " Start date: " + str(rec_date) + " End date: " + str(future_date))
-            # Next: we get the algorithm and the parameters:
-            
-            if len(params) < 2:
-                sys.stderr.write("ERROR: Invalid arguments for random forest")
-                sys.stderr.write("\tn: Number of regression trees.")
-                sys.stderr.write("\tfull: whether to use the full set of technical indicators or just three of them.")
-                exit(-1)
-            proc = Process(target=regressor, args=(params, splitted_data, rec_date, metrics, directory, alg_name,
-                                                months_term))
-            procs.append(proc)
-            proc.start()
+        # Now, we choose metrics:
+        print("Executing algorithm: " + model + " Start date: " + str(rec_date) + " End date: " + str(future_date))
+        # Next: we get the algorithm and the parameters:
+        
+        proc = Process(target=regressor, args=(model, params, splitted_data, rec_date, metrics, directory, alg_name,
+                                            months_term, save_for_testing))
+        procs.append(proc)
+        proc.start()
 
     if len(procs) > 0:
         for proc in procs:
