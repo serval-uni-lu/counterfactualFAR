@@ -4,7 +4,6 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-numpy = "*"
 pandas = "*"
 scipy = "*"
 tabulate = "*"
@@ -18,6 +17,7 @@ dice-ml = "*"
 termcolor = "*"
 torch = "==2.3.0"
 pytorch-tabnet = "*"
+numpy = "*"
 
 [dev-packages]
 
