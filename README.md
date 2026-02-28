@@ -55,10 +55,20 @@ Information about args:
 
 **Obtain all recommendations**:
 
-Three models are accepted: rfr, mlp and tabnet
+Three models are accepted: rfr, mlp and tabnet.
+
+Specify the parameters or defaults will be used.
 
 ```
-python3 run_recommendation.py FAR-Trans-Data results mlp
+python3 run_recommendation.py FAR-Trans-Data results rfr 10
+```
+
+```
+python3 run_recommendation.py FAR-Trans-Data results mlp 64 32 8 4
+```
+
+```
+python3 run_recommendation.py FAR-Trans-Data results tabnet 64 64 5
 ```
 
 Run specific time recommendation
