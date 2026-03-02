@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 
 RESULTS_ROOT = "results"
-STATS_DIR = os.path.join(RESULTS_ROOT, "stats")
+STATS_DIR = "stats"
 SUMMARY_COLUMNS = ["mean", "median", "std", "min", "max"]
 
 # These experiment ranges are defined in run_recommendation.py -> dates = [...]
