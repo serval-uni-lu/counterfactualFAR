@@ -61,7 +61,7 @@ class MLPKPIModel(nn.Module):
         """
         Initialize the MLP model with internal KPI generation capability.
         
-        :param hidden_sizes: List of hidden layer sizes. Default: [128, 64, 32]
+        :param hidden_sizes: List of hidden layer sizes. Default: [64, 32, 16]
         :param k: Parameter for moving average in KPI generation
         :param kpi_type: Type of KPIs to generate ("full", "basic", "short", "full_short")
         :param kpi_features: List of KPI feature names to use as input to the MLP
@@ -69,7 +69,7 @@ class MLPKPIModel(nn.Module):
         super().__init__()
 
         if hidden_sizes is None:
-            hidden_sizes = [256, 128, 64]
+            hidden_sizes = [64, 32, 16]
 
         self.hidden_sizes = hidden_sizes
         self.k = k
