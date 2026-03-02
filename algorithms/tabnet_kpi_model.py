@@ -1,5 +1,4 @@
 import os
-import itertools
 
 import numpy as np
 import pandas as pd
@@ -26,13 +25,6 @@ class TabNetKPIModel:
         n_steps=5,
         gamma=1.5,
         lambda_sparse=1e-4,
-        auto_tune=False,
-        tune_n_d_candidates=(16, 24, 32),
-        tune_n_a_candidates=(16, 24, 32),
-        tune_n_steps_candidates=(3, 5),
-        tune_lr_candidates=(1e-3, 3e-3, 5e-3),
-        tune_batch_candidates=(512, 1024),
-        target_clip_quantiles=(0.01, 0.99),
     ):
         self.k = k
         self.kpi_type = kpi_type
@@ -43,13 +35,6 @@ class TabNetKPIModel:
         self.n_steps = n_steps
         self.gamma = gamma
         self.lambda_sparse = lambda_sparse
-        self.auto_tune = auto_tune
-        self.tune_n_d_candidates = tuple(int(x) for x in tune_n_d_candidates)
-        self.tune_n_a_candidates = tuple(int(x) for x in tune_n_a_candidates)
-        self.tune_n_steps_candidates = tuple(int(x) for x in tune_n_steps_candidates)
-        self.tune_lr_candidates = tuple(float(x) for x in tune_lr_candidates)
-        self.tune_batch_candidates = tuple(int(x) for x in tune_batch_candidates)
-        self.target_clip_quantiles = target_clip_quantiles
 
         self.kpi_generator = MAKPIGenerator(data=None, k=k, kpi_type=kpi_type)
         self.model = None
@@ -90,14 +75,6 @@ class TabNetKPIModel:
             return split_df, None
 
         return train_df, val_df
-
-    def _clip_target(self, train_target, val_target=None):
-        q_low, q_high = self.target_clip_quantiles
-        low = float(np.quantile(train_target, q_low))
-        high = float(np.quantile(train_target, q_high))
-        clipped_train = np.clip(train_target, low, high)
-        clipped_val = None if val_target is None else np.clip(val_target, low, high)
-        return clipped_train, clipped_val
 
     def _best_val_rmse(self, model):
         history = getattr(model, "history", None)
@@ -162,7 +139,7 @@ class TabNetKPIModel:
         y,
         kpi_features,
         epochs=200,
-        batch_size=1024,
+        batch_size=2048,
         learning_rate=3e-3,
         weight_decay=1e-5,
         val_split=0.15,
@@ -216,98 +193,32 @@ class TabNetKPIModel:
                 y_val = val_df["target"].values.astype(np.float32).reshape(-1, 1)
             else:
                 X_val, y_val = None, None
-
-            y_train, y_val = self._clip_target(y_train, y_val)
         else:
             X = self._select_features_in_order(kpis_df).values.astype(np.float32)
             if isinstance(y, pd.Series):
                 y = y.values
             target = np.asarray(y).astype(np.float32).reshape(-1, 1)
-            target, _ = self._clip_target(target, None)
             X_train, y_train = X, target
             X_val, y_val = None, None
 
         if X_train.shape[0] == 0:
             return
 
-        do_tune = bool(self.auto_tune and X_val is not None and y_val is not None and X_val.shape[0] > 0)
-
-        if do_tune:
-            best_model = None
-            best_score = np.inf
-            best_params = None
-
-            arch_grid = itertools.product(
-                self.tune_n_d_candidates,
-                self.tune_n_a_candidates,
-                self.tune_n_steps_candidates,
-            )
-
-            for n_d, n_a, n_steps in arch_grid:
-                model, score = self._fit_one(
-                    X_train,
-                    y_train,
-                    X_val,
-                    y_val,
-                    n_d=n_d,
-                    n_a=n_a,
-                    n_steps=n_steps,
-                    learning_rate=learning_rate,
-                    batch_size=batch_size,
-                    epochs=epochs,
-                    patience=patience,
-                    weight_decay=weight_decay,
-                    device=device,
-                )
-                if score < best_score:
-                    best_model = model
-                    best_score = score
-                    best_params = (n_d, n_a, n_steps, learning_rate, batch_size)
-
-            if best_params is None:
-                raise ValueError("TabNet tuning failed to produce a valid architecture candidate")
-
-            base_n_d, base_n_a, base_n_steps, _, _ = best_params
-
-            for lr, bs in itertools.product(self.tune_lr_candidates, self.tune_batch_candidates):
-                model, score = self._fit_one(
-                    X_train,
-                    y_train,
-                    X_val,
-                    y_val,
-                    n_d=base_n_d,
-                    n_a=base_n_a,
-                    n_steps=base_n_steps,
-                    learning_rate=lr,
-                    batch_size=bs,
-                    epochs=epochs,
-                    patience=patience,
-                    weight_decay=weight_decay,
-                    device=device,
-                )
-                if score < best_score:
-                    best_model = model
-                    best_score = score
-                    best_params = (base_n_d, base_n_a, base_n_steps, lr, bs)
-
-            self.model = best_model
-            self.n_d, self.n_a, self.n_steps, learning_rate, batch_size = best_params
-        else:
-            self.model, _ = self._fit_one(
-                X_train,
-                y_train,
-                X_val,
-                y_val,
-                n_d=self.n_d,
-                n_a=self.n_a,
-                n_steps=self.n_steps,
-                learning_rate=learning_rate,
-                batch_size=batch_size,
-                epochs=epochs,
-                patience=patience,
-                weight_decay=weight_decay,
-                device=device,
-            )
+        self.model, _ = self._fit_one(
+            X_train,
+            y_train,
+            X_val,
+            y_val,
+            n_d=self.n_d,
+            n_a=self.n_a,
+            n_steps=self.n_steps,
+            learning_rate=learning_rate,
+            batch_size=batch_size,
+            epochs=epochs,
+            patience=patience,
+            weight_decay=weight_decay,
+            device=device,
+        )
 
         self.is_fitted = True
 
