@@ -60,7 +60,7 @@ Three models are accepted: rfr, mlp and tabnet.
 Specify the parameters or defaults will be used.
 
 ```
-python3 run_recommendation.py FAR-Trans-Data results rfr 10
+python3 run_recommendation.py FAR-Trans-Data results rfr 100
 ```
 
 ```
@@ -68,7 +68,7 @@ python3 run_recommendation.py FAR-Trans-Data results mlp 64 32 8 4
 ```
 
 ```
-python3 run_recommendation.py FAR-Trans-Data results tabnet 64 64 5
+python3 run_recommendation.py FAR-Trans-Data results tabnet 32 32 7
 ```
 
 Run specific time recommendation
