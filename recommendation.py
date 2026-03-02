@@ -30,6 +30,7 @@ except Exception:
 from algorithms.kpi_gen.load_kpi_generator import LoadKPIGenerator
 from algorithms.kpi_gen.ma_kpi_generator import MAKPIGenerator
 from algorithms.mlp_kpi_model import MLPKPIModel
+from algorithms.rfr_kpi_model import RFRKPIModel
 from algorithms.tabnet_kpi_model import TabNetKPIModel
 from algorithms.profitability_prediction import ProfitabilityPrediction
 from data.filter.asset.asset_with_test_price import AssetWithTestPrice
@@ -89,8 +90,33 @@ MLP_KPI_TYPES = {"full", "basic", "basic_short", "full_short"}
 TABNET_ALLOWED_KEYS = {"kpi", "kpi_type", "n_d", "n_a", "n_steps"}
 
 
+def _parse_rfr_params(params):
+    n = 20
+    kpi_type = "full_short"
+    use_internal = True
+
+    for raw in params or []:
+        token = str(raw).strip()
+        if token == "":
+            continue
+
+        token_lower = token.lower()
+        if token_lower in MLP_KPI_TYPES:
+            kpi_type = token_lower
+            continue
+
+        if token_lower in {"legacy", "external"}:
+            use_internal = False
+            continue
+
+        if token.lstrip("+-").isdigit():
+            n = int(token)
+
+    return n, kpi_type, use_internal
+
+
 def _parse_mlp_params(params):
-    hidden_sizes = [256, 128, 64]
+    hidden_sizes = [64, 32, 16]
     kpi_type = "full_short"
 
     if not params:
@@ -267,10 +293,11 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
     kpi_type = "full_short"
     hidden_sizes = None
     tabnet_cfg = None
+    use_internal_rfr = True
+    n = 20
 
     if model_id == RFR:
-        n = int(param[0]) if len(param) >= 1 else 20
-        kpi_type = param[1] if len(param) >= 2 else "full_short"
+        n, kpi_type, use_internal_rfr = _parse_rfr_params(param)
     elif model_id == MLP:
         hidden_sizes, kpi_type = _parse_mlp_params(param)
     elif model_id == TABNET:
@@ -289,7 +316,16 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
         feats = full_short_kpis
     
     if model_id == RFR:
-        alg_model = RandomForestRegressor(n_estimators=n, random_state=42)
+        if use_internal_rfr:
+            alg_model = RFRKPIModel(
+                n_estimators=n,
+                k=5,
+                kpi_type=kpi_type,
+                kpi_features=feats,
+                random_state=42,
+            )
+        else:
+            alg_model = RandomForestRegressor(n_estimators=n, random_state=42)
     elif model_id == MLP:
         # Create MLP model (KPI generation happens inside the model)
         alg_model = MLPKPIModel(
@@ -309,11 +345,12 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
             n_d=tabnet_cfg["n_d"],
             n_a=tabnet_cfg["n_a"],
             n_steps=tabnet_cfg["n_steps"],
-            auto_tune=False,
         )
 
+    training_sizes_path = os.path.join(os.path.dirname(output_dir), "training_sizes.csv")
     algorithm = ProfitabilityPrediction(alg_model, financial_data, num_months, feats, -1,
-                                        save_for_testing=save_for_testing)
+                                        save_for_testing=save_for_testing,
+                                        training_sizes_path=training_sizes_path)
     file_name = os.path.join(output_dir, file)
     test(algorithm, eval_metrics, file_name, recommendation_date, financial_data.users)
 
@@ -351,15 +388,10 @@ def get_name(rec_model, param):
         )
     else:
         # For backward compatibility with RFR
-        if len(param) >= 2:
-            n = int(param[0])
-            full = param[1]
-            algorithm_name = RFR + "_" + str(n) + "_" + full
-        elif len(param) >= 1:
-            n = int(param[0])
-            algorithm_name = RFR + "_" + str(n) + "_full_short"
-        else:
-            algorithm_name = RFR + "_20_full_short"
+        n, kpi_type, use_internal_rfr = _parse_rfr_params(param)
+        algorithm_name = RFR + "_" + str(n) + "_" + kpi_type
+        if use_internal_rfr:
+            algorithm_name += "_internal_kpis"
 
     return algorithm_name
 
@@ -518,8 +550,8 @@ if __name__ == "__main__":
     params = args.params
 
     selected_kpi_type = "full_short"
-    if model == RFR and len(params) >= 2:
-        selected_kpi_type = params[1]
+    if model == RFR:
+        _, selected_kpi_type, use_internal_rfr = _parse_rfr_params(params)
     elif model == MLP:
         _, selected_kpi_type = _parse_mlp_params(params)
     elif model == TABNET:
@@ -539,7 +571,7 @@ if __name__ == "__main__":
     print("Dataset loaded (" + '{}'.format(timeb) + ")")
 
     # Compute the technical indicators (required for Random Forest)
-    if model == RFR:
+    if model == RFR and not use_internal_rfr:
         kpi_file = os.path.join(directory, f"kpis_{selected_kpi_type}.csv")
         kpi_type = selected_kpi_type
 

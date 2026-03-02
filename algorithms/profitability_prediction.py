@@ -11,6 +11,8 @@
 import os
 import copy
 import re
+import fcntl
+import pickle
 
 import datetime
 import random
@@ -20,10 +22,12 @@ from utils.constants import DEFAULT_TIMESTAMP_COL, DEFAULT_ITEM_COL, DEFAULT_USE
 
 from algorithms.algorithm import Algorithm
 from algorithms.mlp_kpi_model import MLPKPIModel
+from algorithms.rfr_kpi_model import RFRKPIModel
 from algorithms.tabnet_kpi_model import TabNetKPIModel
+from algorithms.torch_kpi_window_encoder import KPIWindowEncoder, WindowToFeatureHeadModel
 
 
-INTERNAL_KPI_MODELS = (MLPKPIModel, TabNetKPIModel)
+INTERNAL_KPI_MODELS = (MLPKPIModel, TabNetKPIModel, RFRKPIModel)
 
 
 class ProfitabilityPrediction(Algorithm):
@@ -31,7 +35,8 @@ class ProfitabilityPrediction(Algorithm):
     Algorithm that predicts the future profitability of assets. Ranks the assets according to that value.
     """
 
-    def __init__(self, model, data, months, indicators, train_examples_per_asset, save_for_testing=False):
+    def __init__(self, model, data, months, indicators, train_examples_per_asset, save_for_testing=False,
+                 training_sizes_path=None):
         """
         Configures the profitability prediction model.
         :param model: the model to train.
@@ -49,6 +54,7 @@ class ProfitabilityPrediction(Algorithm):
         self.train_examples_per_asset = train_examples_per_asset
         self.is_fitted = False
         self.save_for_testing = save_for_testing
+        self.training_sizes_path = training_sizes_path
 
     # CHANGED: added functions
     def _model_tag(self):
@@ -56,6 +62,8 @@ class ProfitabilityPrediction(Algorithm):
             return "mlp"
         if isinstance(self.model, TabNetKPIModel):
             return "tabnet"
+        if isinstance(self.model, RFRKPIModel):
+            return "rfr"
         return "rfr"
 
     def _safe_fragment(self, value):
@@ -77,6 +85,11 @@ class ProfitabilityPrediction(Algorithm):
             n_steps = getattr(self.model, "n_steps", "na")
             return self._safe_fragment(f"kpi-{kpi_type}_nd-{n_d}_na-{n_a}_steps-{n_steps}")
 
+        if isinstance(self.model, RFRKPIModel):
+            n_estimators = getattr(self.model, "n_estimators", "na")
+            kpi_type = getattr(self.model, "kpi_type", "na")
+            return self._safe_fragment(f"n-{n_estimators}_kpi-{kpi_type}_internal_kpis")
+
         n_estimators = getattr(self.model, "n_estimators", "na")
         return self._safe_fragment(f"n-{n_estimators}")
 
@@ -96,10 +109,46 @@ class ProfitabilityPrediction(Algorithm):
         if not os.path.exists(path):
             df.to_csv(path, index=False)
 
+    def _save_training_size(self, train_date, train_rows):
+        if self.training_sizes_path is None:
+            return
+
+        out_path = self.training_sizes_path
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+        row = {
+            "model": self._model_tag(),
+            "model_params": self._model_param_tag(),
+            "rec_date": pd.to_datetime(train_date).strftime("%Y-%m-%d"),
+            "train_rows": int(train_rows),
+        }
+
+        lock_path = out_path + ".lock"
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+            if os.path.exists(out_path):
+                current = pd.read_csv(out_path)
+            else:
+                current = pd.DataFrame(columns=["model", "model_params", "rec_date", "train_rows"])
+
+            exists_mask = (
+                (current["model"] == row["model"])
+                & (current["model_params"] == row["model_params"])
+                & (current["rec_date"] == row["rec_date"])
+            ) if len(current) > 0 else pd.Series([], dtype=bool)
+
+            if len(current) == 0 or not exists_mask.any():
+                updated = pd.concat([current, pd.DataFrame([row])], ignore_index=True)
+                updated = updated.sort_values(["model", "model_params", "rec_date"]).reset_index(drop=True)
+                updated.to_csv(out_path, index=False)
+
     def _generate_internal_kpis(self, time_series_df):
         if isinstance(self.model, MLPKPIModel):
             return self.model.kpi_module.generate_kpis_df(time_series_df)
         if isinstance(self.model, TabNetKPIModel):
+            return self.model._generate_kpis_df(time_series_df)
+        if isinstance(self.model, RFRKPIModel):
             return self.model._generate_kpis_df(time_series_df)
         raise ValueError("Internal KPI generation requested for a non-internal model")
 
@@ -110,6 +159,8 @@ class ProfitabilityPrediction(Algorithm):
         if isinstance(self.model, MLPKPIModel):
             has_kpi_path = hasattr(self.model, "kpi_module") and hasattr(self.model.kpi_module, "generate_kpis_df")
         elif isinstance(self.model, TabNetKPIModel):
+            has_kpi_path = hasattr(self.model, "_generate_kpis_df")
+        elif isinstance(self.model, RFRKPIModel):
             has_kpi_path = hasattr(self.model, "_generate_kpis_df")
         else:
             has_kpi_path = False
@@ -123,8 +174,8 @@ class ProfitabilityPrediction(Algorithm):
         if not hasattr(self.model, "fit"):
             raise ValueError("Internal model contract violation: missing fit(...) method")
 
-        if not hasattr(self.model, "predict_with_kpis"):
-            raise ValueError("Internal model contract violation: missing predict_with_kpis(...) method")
+        if not (hasattr(self.model, "predict_with_kpis") or hasattr(self.model, "predict")):
+            raise ValueError("Internal model contract violation: missing predict(...) or predict_with_kpis(...) method")
 
     def _compute_targets_from_kpi_df(self, kpi_df):
         asset_dfs = []
@@ -164,62 +215,17 @@ class ProfitabilityPrediction(Algorithm):
         split_assets = set(self.data.assets)
         time_series_df = time_series_df[time_series_df[DEFAULT_ITEM_COL].isin(split_assets)]
 
-        if self.kpis is None and isinstance(self.model, INTERNAL_KPI_MODELS):
-            kpis_df = self._generate_internal_kpis(time_series_df)
-            targets_df = self._compute_targets_from_kpi_df(kpis_df)
-
-            train_targets = targets_df[targets_df[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]
-            test_targets = targets_df[targets_df[DEFAULT_TIMESTAMP_COL] >= (train_date - delta)]
-
-            if train_targets.shape[0] > 0:
-                training_time_series = time_series_df[time_series_df[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                if isinstance(self.model, TabNetKPIModel):
-                    self.model.fit(
-                        training_time_series,
-                        train_targets,
-                        kpi_features=self.indicators,
-                        epochs=150,
-                        batch_size=1024,
-                        learning_rate=3e-3,
-                        weight_decay=1e-5,
-                        val_split=0.1,
-                        patience=20,
-                        device=device,
-                        artifact_label=self._dataset_artifact_label(train_date) if self.save_for_testing else None,
-                    )
-                else:
-                    self.model.fit(
-                        training_time_series,
-                        train_targets,
-                        kpi_features=self.indicators,
-                        epochs=150,
-                        batch_size=2048 * 2,
-                        learning_rate=1e-3,
-                        weight_decay=1e-4,
-                        val_split=0.1,
-                        patience=15,
-                        device=device,
-                        artifact_label=self._dataset_artifact_label(train_date) if self.save_for_testing else None,
-                    )
-                self.is_fitted = True
-
-                if self.save_for_testing:
-                    if isinstance(self.model, INTERNAL_KPI_MODELS):
-                        train_snapshot = self._snapshot_internal_time_series_rows(training_time_series, train_targets)
-                        test_snapshot = self._snapshot_internal_time_series_rows(time_series_df, test_targets)
-                    else:
-                        train_snapshot = self._snapshot_internal_training_rows(kpis_df, train_targets)
-                        test_snapshot = self._snapshot_internal_training_rows(kpis_df, test_targets)
-                    self._save_csv_if_missing(train_snapshot, self._dataset_artifact_path("training_data", train_date))
-                    self._save_csv_if_missing(test_snapshot, self._dataset_artifact_path("testing_data", train_date))
-                    self.save_fitted_model(train_date)
-
-            return
-
         # As a first step, we find the technical indicators. We use all the possible information previous
         # to the training date - the number of months we are considering.
-        kpi_indicators = self.kpis[self.kpis[DEFAULT_ITEM_COL].isin(self.data.assets)]
+        if self.kpis is None and isinstance(self.model, INTERNAL_KPI_MODELS):
+            source_kpis = self._generate_internal_kpis(time_series_df)
+        else:
+            source_kpis = self.kpis
+
+        if source_kpis is None:
+            raise ValueError("KPI data is missing and the selected model does not generate KPIs internally")
+
+        kpi_indicators = source_kpis[source_kpis[DEFAULT_ITEM_COL].isin(self.data.assets)]
         # For each asset, we get the target (profitability at k months)
         asset_dfs = []
         for asset in kpi_indicators[DEFAULT_ITEM_COL].unique():
@@ -260,6 +266,7 @@ class ProfitabilityPrediction(Algorithm):
         kpi_indicators_test = kpi_indicators_test.dropna()
 
         if kpi_indicators_features.shape[0] > 0:  # CHANGED
+            self._save_training_size(train_date, kpi_indicators_features.shape[0])
             # Check if model internally generates KPIs
             if isinstance(self.model, INTERNAL_KPI_MODELS):
                 training_time_series = time_series_df[time_series_df[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]
@@ -271,12 +278,19 @@ class ProfitabilityPrediction(Algorithm):
                         train_targets,
                         kpi_features=self.indicators,
                         epochs=150,
-                        batch_size=1024,
+                        batch_size=2048,
                         learning_rate=3e-3,
                         weight_decay=1e-5,
                         val_split=0.1,
                         patience=20,
                         device=device,
+                        artifact_label=self._dataset_artifact_label(train_date) if self.save_for_testing else None,
+                    )
+                elif isinstance(self.model, RFRKPIModel):
+                    self.model.fit(
+                        training_time_series,
+                        train_targets,
+                        kpi_features=self.indicators,
                         artifact_label=self._dataset_artifact_label(train_date) if self.save_for_testing else None,
                     )
                 else:
@@ -285,7 +299,7 @@ class ProfitabilityPrediction(Algorithm):
                         train_targets,
                         kpi_features=self.indicators,
                         epochs=150,
-                        batch_size=2048 * 2,
+                        batch_size=2048,
                         learning_rate=1e-3,
                         weight_decay=1e-4,
                         val_split=0.1,
@@ -333,6 +347,67 @@ class ProfitabilityPrediction(Algorithm):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             torch.save(payload, path)
 
+        def _save_pickle_object(payload, path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as handle:
+                pickle.dump(payload, handle)
+
+        def _window_size_for_export(kpi_type, k):
+            periods = [21, 63, 126] if "short" in str(kpi_type).lower() else [21, 63, 126, 189]
+            min_len = max(periods) + int(k)
+            return max(160, min_len)
+
+        def _export_end_to_end_onnx(torch_head_model, model_family, kpi_type, k):
+            export_device = torch.device("cpu")
+            head_cpu = _prepare_torch_model_for_export(copy.deepcopy(torch_head_model), export_device)
+            encoder = KPIWindowEncoder(feature_names=list(self.indicators), kpi_type=kpi_type, k=int(k))
+            end_to_end = WindowToFeatureHeadModel(encoder=encoder, head_model=head_cpu).eval().to(export_device)
+
+            window_size = _window_size_for_export(kpi_type, k)
+            ts_pt_path = self._artifact_path("profitability_recommendation_ts", train_date, "pt")
+            _save_torch_checkpoint(
+                {
+                    "model_family": model_family,
+                    "kpi_type": kpi_type,
+                    "k": int(k),
+                    "window_size": int(window_size),
+                    "indicators": list(self.indicators),
+                    "module": end_to_end,
+                },
+                ts_pt_path,
+            )
+
+            dummy_input = torch.randn(1, window_size, dtype=torch.float32, device=export_device)
+            ts_onnx_path = self._artifact_path("profitability_recommendation_ts", train_date, "onnx")
+            os.makedirs(os.path.dirname(ts_onnx_path), exist_ok=True)
+
+            torch.onnx.export(
+                end_to_end,
+                dummy_input,
+                ts_onnx_path,
+                input_names=["prices"],
+                output_names=["prediction"],
+                dynamic_axes={"prices": {0: "batch"}, "prediction": {0: "batch"}},
+                opset_version=13,
+                do_constant_folding=True,
+            )
+
+            if self.save_for_testing:
+                metadata_path = self._artifact_path("profitability_recommendation_ts_metadata", train_date, "csv")
+                metadata_df = pd.DataFrame(
+                    [
+                        {
+                            "model_family": model_family,
+                            "kpi_type": kpi_type,
+                            "k": int(k),
+                            "window_size": int(window_size),
+                            "n_features": int(len(self.indicators)),
+                            "features": "|".join(list(self.indicators)),
+                        }
+                    ]
+                )
+                self._save_csv_if_missing(metadata_df, metadata_path)
+
         if self.is_fitted:
             if isinstance(self.model, MLPKPIModel):
                 if self.model.network is None:
@@ -352,6 +427,12 @@ class ProfitabilityPrediction(Algorithm):
                         "state_dict": torch_model.state_dict(),
                     },
                     pt_path,
+                )
+                _export_end_to_end_onnx(
+                    torch_head_model=torch_model,
+                    model_family="mlp",
+                    kpi_type=getattr(self.model, "kpi_type", "full_short"),
+                    k=getattr(self.model, "k", 5),
                 )
             elif isinstance(self.model, TabNetKPIModel):
                 if self.model.model is None:
@@ -377,12 +458,29 @@ class ProfitabilityPrediction(Algorithm):
                     },
                     pt_path,
                 )
+                _export_end_to_end_onnx(
+                    torch_head_model=torch_model,
+                    model_family="tabnet",
+                    kpi_type=getattr(self.model, "kpi_type", "full_short"),
+                    k=getattr(self.model, "k", 5),
+                )
+            elif isinstance(self.model, RFRKPIModel):
+                pipeline_path = self._artifact_path("profitability_recommendation_pipeline", train_date, "pkl")
+                _save_pickle_object(self.model, pipeline_path)
+
+                from skl2onnx import convert_sklearn
+                from skl2onnx.common.data_types import FloatTensorType
+                initial_type = [('float_input', FloatTensorType([None, len(self.indicators)]))]
+                onnx_model = convert_sklearn(self.model.model, initial_types=initial_type)
+                with open(self._artifact_path("profitability_recommendation", train_date, "onnx"), "wb") as f:
+                    f.write(onnx_model.SerializeToString())
             else:
                 # For sklearn models, use skl2onnx
                 from skl2onnx import convert_sklearn
                 from skl2onnx.common.data_types import FloatTensorType
                 initial_type = [('float_input', FloatTensorType([None, len(self.indicators)]))]
-                onnx_model = convert_sklearn(self.model, initial_types=initial_type)
+                sklearn_model = self.model.model if isinstance(self.model, RFRKPIModel) else self.model
+                onnx_model = convert_sklearn(sklearn_model, initial_types=initial_type)
                 with open(self._artifact_path("profitability_recommendation", train_date, "onnx"), "wb") as f:
                     f.write(onnx_model.SerializeToString())
         else:
@@ -395,14 +493,22 @@ class ProfitabilityPrediction(Algorithm):
         fields.append(DEFAULT_TIMESTAMP_COL)
         prediction_input_snapshot = None
 
-        # We first obtain the KPIs or a time-series based item list
-        if self.kpis is None:
-            kpi_indicators = self.data.time_series[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]]
+        # We first obtain KPI rows at recommendation time.
+        if self.kpis is None and isinstance(self.model, INTERNAL_KPI_MODELS):
+            if isinstance(self.model, RFRKPIModel):
+                kpi_indicators = self.data.time_series[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]].copy()
+            else:
+                prediction_time_series = self.data.time_series[
+                    self.data.time_series[DEFAULT_ITEM_COL].isin(self.data.assets)
+                ]
+                kpis_all = self._generate_internal_kpis(prediction_time_series)
+                kpi_indicators = kpis_all[fields]
         else:
             kpi_indicators = self.kpis[fields]
 
         kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_TIMESTAMP_COL] == rec_time]
         kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_ITEM_COL].isin(self.data.assets)]
+        kpi_indicators = kpi_indicators.drop_duplicates(subset=[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL])
 
         # Then, we obtain the recommendation scores:
         if self.is_fitted:
@@ -410,23 +516,37 @@ class ProfitabilityPrediction(Algorithm):
                 prediction_time_series = self.data.time_series[
                     self.data.time_series[DEFAULT_ITEM_COL].isin(self.data.assets)
                 ]
-                kpis_df, predictions = self.model.predict_with_kpis(
-                    prediction_time_series,
-                    artifact_label=self._dataset_artifact_label(rec_time) if self.save_for_testing else None,
-                )
+                if hasattr(self.model, "predict_with_kpis") and not isinstance(self.model, RFRKPIModel):
+                    kpis_df, predictions = self.model.predict_with_kpis(prediction_time_series)
+                else:
+                    predictions = self.model.predict(prediction_time_series)
+                    if isinstance(self.model, RFRKPIModel):
+                        kpis_df = getattr(getattr(self.model, "transformer", None), "last_kpis_df_", None)
+                        if kpis_df is None:
+                            kpis_df = self._generate_internal_kpis(prediction_time_series)
+                    else:
+                        kpis_df = self._generate_internal_kpis(prediction_time_series)
                 kpis_df = kpis_df.copy()
+                if len(kpis_df) != len(predictions):
+                    raise ValueError(
+                        "Internal model prediction shape mismatch: "
+                        f"len(kpis_df)={len(kpis_df)} vs len(predictions)={len(predictions)}"
+                    )
                 kpis_df["score"] = predictions.flatten()
                 kpis_df = kpis_df[
                     (kpis_df[DEFAULT_TIMESTAMP_COL] == rec_time)
                     & (kpis_df[DEFAULT_ITEM_COL].isin(self.data.assets))
                 ]
-                asset_scores = kpis_df.groupby(DEFAULT_ITEM_COL)["score"].mean().to_dict()
-                kpi_indicators["score"] = kpi_indicators[DEFAULT_ITEM_COL].apply(lambda x: asset_scores.get(x, 0.0))
+                score_df = kpis_df[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "score"]].copy()
+                kpi_indicators = kpi_indicators.merge(
+                    score_df,
+                    on=[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL],
+                    how="left",
+                )
+                kpi_indicators["score"] = kpi_indicators["score"].fillna(0.0)
 
-                prediction_input_snapshot = self.data.time_series[
-                    (self.data.time_series[DEFAULT_TIMESTAMP_COL] == rec_time)
-                    & (self.data.time_series[DEFAULT_ITEM_COL].isin(self.data.assets))
-                ].copy()
+                feature_cols = [col for col in self.indicators if col in kpi_indicators.columns]
+                prediction_input_snapshot = kpi_indicators[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL] + feature_cols].copy()
             else:
                 kpi_indicators["score"] = self.model.predict(kpi_indicators[self.indicators])
                 feature_cols = [col for col in self.indicators if col in kpi_indicators.columns]
