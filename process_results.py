@@ -189,33 +189,18 @@ def save_all_models_plots(all_run_stats_tables):
     if all_df.empty:
         return
 
-    # Compute common y-scale per metric family (e.g., volatility@1..@1000 share one scale).
-    all_df["metric_family"] = all_df["metric"].astype(str).str.split("@").str[0]
-    family_y_limits = {}
-    for family, family_df in all_df.groupby("metric_family"):
-        y_min = float(family_df["mean"].min())
-        y_max = float(family_df["mean"].max())
-        if y_min == y_max:
-            pad = max(0.05, abs(y_min) * 0.05)
-        else:
-            pad = 0.08 * (y_max - y_min)
-        family_y_limits[family] = (y_min - pad, y_max + pad)
-
     # For each metric, compare ALL model runs in one bar chart using mean values.
     metrics = sorted(all_df["metric"].unique().tolist())
     for metric_name in metrics:
         metric_df = all_df[all_df["metric"] == metric_name].copy().sort_values("run")
         os.makedirs(plot_root, exist_ok=True)
         out_file = os.path.join(plot_root, f"{_sanitize_filename(metric_name)}.png")
-        metric_family = str(metric_name).split("@")[0]
 
         fig, ax = plt.subplots(figsize=(12, 7.2))
         ax.bar(metric_df["run"], metric_df["mean"])
         ax.set_title(f"all_models | {metric_name} | mean", fontsize=16)
         ax.set_xlabel("")
         ax.set_ylabel("")
-        if metric_family in family_y_limits:
-            ax.set_ylim(*family_y_limits[metric_family])
         ax.tick_params(axis="x", rotation=65, labelsize=11)
         ax.tick_params(axis="y", labelsize=12)
         ax.grid(axis="y", linestyle="--", alpha=0.3)
