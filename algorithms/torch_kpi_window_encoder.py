@@ -119,4 +119,9 @@ class WindowToFeatureHeadModel(nn.Module):
 
     def forward(self, prices: torch.Tensor) -> torch.Tensor:
         x = self.encoder(prices)
-        return self.head_model(x)
+        out = self.head_model(x)
+        if isinstance(out, tuple):
+            out = out[0]
+        if isinstance(out, list):
+            out = out[0]
+        return out
