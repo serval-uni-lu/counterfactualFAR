@@ -176,12 +176,6 @@ class ProfitabilityPrediction(Algorithm):
         if not (hasattr(self.model, "predict_with_kpis") or hasattr(self.model, "predict")):
             raise ValueError("Internal model contract violation: missing predict(...) or predict_with_kpis(...) method")
 
-    def _snapshot_internal_time_series_rows(self, time_series_df, targets_df):
-        target_cols = [DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]
-        keys = targets_df[target_cols].drop_duplicates()
-        snapshot = keys.merge(time_series_df, on=[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL], how="inner")
-        return snapshot
-    
     def train(self, train_date):
         self._validate_internal_model_contract()
 
@@ -293,16 +287,9 @@ class ProfitabilityPrediction(Algorithm):
             if self.save_for_testing:
                 os.makedirs("for_testing", exist_ok=True)
             
-                # Save to CSV
-                if isinstance(self.model, INTERNAL_KPI_MODELS):
-                    training_data_ts = self._snapshot_internal_time_series_rows(training_time_series, train_targets)
-                    testing_targets = kpi_indicators_test[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]]  # Test target anchors (asset, timestamp, target) for post-train evaluation/export
-                    testing_data_ts = self._snapshot_internal_time_series_rows(time_series_df, testing_targets)  # Raw time-series rows aligned to test anchors
-                    self._save_csv_if_missing(training_data_ts, self._dataset_artifact_path("training_data", train_date))
-                    self._save_csv_if_missing(testing_data_ts, self._dataset_artifact_path("testing_data", train_date))
-                else:
-                    self._save_csv_if_missing(training_data, self._dataset_artifact_path("training_data", train_date))
-                    self._save_csv_if_missing(kpi_indicators_test, self._dataset_artifact_path("testing_data", train_date))
+                # Save to CSV using the same split-derived KPI datasets for both internal and external flows.
+                self._save_csv_if_missing(training_data, self._dataset_artifact_path("training_data", train_date))
+                self._save_csv_if_missing(kpi_indicators_test, self._dataset_artifact_path("testing_data", train_date))
                 self.save_fitted_model(train_date)
 
 
@@ -469,16 +456,16 @@ class ProfitabilityPrediction(Algorithm):
         fields.append(DEFAULT_ITEM_COL)
         fields.append(DEFAULT_TIMESTAMP_COL)
         prediction_input_snapshot = None
-        prediction_time_series = None
+        prediction_time_series = self.data.time_series[
+            self.data.time_series[DEFAULT_ITEM_COL].isin(self.data.assets)
+        ]
+        prediction_time_series = prediction_time_series[
+            prediction_time_series[DEFAULT_TIMESTAMP_COL] <= rec_time
+        ]
 
         # We first obtain KPI rows at recommendation time.
         if isinstance(self.model, INTERNAL_KPI_MODELS):
-            prediction_time_series = self.data.time_series[
-                self.data.time_series[DEFAULT_ITEM_COL].isin(self.data.assets)
-            ]
-            prediction_time_series = prediction_time_series[
-                prediction_time_series[DEFAULT_TIMESTAMP_COL] <= rec_time
-            ]  # Recommendation-time cutoff: never expose future rows to internal KPI generation.
+            # Recommendation-time cutoff: never expose future rows to internal KPI generation.
             if self.is_fitted:
                 # For fitted internal models, get KPI rows from the model prediction path to avoid computing KPIs twice.
                 kpi_indicators = None
