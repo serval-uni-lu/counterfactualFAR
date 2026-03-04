@@ -596,7 +596,7 @@ if __name__ == "__main__":
     # Now, we select the possible dates:
     if date_format == "range":
         print("Num splits:" + str(num_splits) + " Num future: " + str(num_future))
-        dates, future_dates = data.get_dates(min_date, max_date, num_splits, num_future)
+        dates, future_dates = data.get_dates(min_date, max_date, num_splits, num_future)  # Split schedule: recommendation dates (train cutoff) + future evaluation dates (test horizon end)
     else:
         print("Num splits:" + str(num_splits))
         for date in dates_args:
@@ -644,7 +644,7 @@ if __name__ == "__main__":
             continue
 
         # Get the corresponding file names:
-        splitted_data = data.split(min_split_date, rec_date, future_date,
+        splitted_data = data.split(min_split_date, rec_date, future_date,  # Core temporal split: train in [min_split_date, rec_date), test in [rec_date, future_date]
                                 DataFilter(CustomerInTrain(), AssetWithTestPrice(), RatingsNotInTrain(),
                                             NoFilter(), False, True, False))
 

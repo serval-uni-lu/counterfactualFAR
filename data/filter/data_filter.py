@@ -59,19 +59,19 @@ class DataFilter:
         customers = self.customer_filter.filter(customers, time_series, train, valid, test)
         assets = self.asset_filter.filter(time_series, train, valid, test, split_date)
         time_series_aux = self.ts_filter.filter(time_series, train, valid, test)
-        ratings_train, ratings_valid, ratings_test = self.rating_filter.filter(time_series, train, valid, test)
+        ratings_train, ratings_valid, ratings_test = self.rating_filter.filter(time_series, train, valid, test)  # Post-split cleaning of train/valid/test interaction partitions
 
         if self.apply_cf_to_ratings:
-            ratings_train = ratings_train[ratings_train[DEFAULT_USER_COL].isin(customers)]
+            ratings_train = ratings_train[ratings_train[DEFAULT_USER_COL].isin(customers)]  # TRAIN split restricted to filtered customers
             if ratings_valid is not None:
-                ratings_valid = ratings_valid[ratings_valid[DEFAULT_USER_COL].isin(customers)]
-            ratings_test = ratings_test[ratings_test[DEFAULT_USER_COL].isin(customers)]
+                ratings_valid = ratings_valid[ratings_valid[DEFAULT_USER_COL].isin(customers)]  # VALID split restricted to filtered customers
+            ratings_test = ratings_test[ratings_test[DEFAULT_USER_COL].isin(customers)]  # TEST split restricted to filtered customers
 
         if self.apply_af_to_ratings:
-            ratings_train = ratings_train[ratings_train[DEFAULT_ITEM_COL].isin(assets)]
+            ratings_train = ratings_train[ratings_train[DEFAULT_ITEM_COL].isin(assets)]  # TRAIN split restricted to filtered assets
             if ratings_valid is not None:
-                ratings_valid = ratings_valid[ratings_valid[DEFAULT_ITEM_COL].isin(assets)]
-            ratings_test = ratings_test[ratings_test[DEFAULT_ITEM_COL].isin(assets)]
+                ratings_valid = ratings_valid[ratings_valid[DEFAULT_ITEM_COL].isin(assets)]  # VALID split restricted to filtered assets
+            ratings_test = ratings_test[ratings_test[DEFAULT_ITEM_COL].isin(assets)]  # TEST split restricted to filtered assets
 
         if self.apply_af_to_ts:
             time_series_aux = time_series_aux[time_series_aux[DEFAULT_ITEM_COL].isin(assets)]

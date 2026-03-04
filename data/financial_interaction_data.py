@@ -99,12 +99,12 @@ class FinancialInteractionData:
             self.load()
 
         # As a first step, we divide the data
-        training = self.data[self.data[DEFAULT_TIMESTAMP_COL].between(min_date, rec_date, inclusive="left")]
-        test = self.data[self.data[DEFAULT_TIMESTAMP_COL].between(rec_date, max_date, inclusive="both")]
+        training = self.data[self.data[DEFAULT_TIMESTAMP_COL].between(min_date, rec_date, inclusive="left")]  # TRAIN split: interactions from min_date up to (but excluding) rec_date
+        test = self.data[self.data[DEFAULT_TIMESTAMP_COL].between(rec_date, max_date, inclusive="both")]  # TEST split: interactions from rec_date through max_date (inclusive)
 
         # Filter: we only leave those users and items in the training set.
-        test = test[test[DEFAULT_USER_COL].isin(training[DEFAULT_USER_COL].unique().flatten())]
-        test = test[test[DEFAULT_ITEM_COL].isin(training[DEFAULT_ITEM_COL].unique().flatten())]
+        test = test[test[DEFAULT_USER_COL].isin(training[DEFAULT_USER_COL].unique().flatten())]  # Keep only test users seen in training
+        test = test[test[DEFAULT_ITEM_COL].isin(training[DEFAULT_ITEM_COL].unique().flatten())]  # Keep only test assets seen in training
 
         # Then, for each of the remaining users, we remove the items already consumed during the training phase:
         # If we do not allow them, we remove the items already consumed during training.
@@ -113,7 +113,7 @@ class FinancialInteractionData:
             for user in test[DEFAULT_USER_COL].unique():
                 items_user = set(training[training[DEFAULT_USER_COL] == user][DEFAULT_ITEM_COL].unique().flatten())
                 items_test_user = set(test[test[DEFAULT_USER_COL] == user][DEFAULT_ITEM_COL].unique().flatten())
-                diff = items_test_user - items_user
+                diff = items_test_user - items_user  # Test-only items for this user (removes assets already consumed in training)
                 if len(diff) > 0:
                     user_test_df = test[test[DEFAULT_USER_COL] == user]
                     user_test_df = user_test_df[user_test_df[DEFAULT_ITEM_COL].isin(diff)]
@@ -150,11 +150,11 @@ class FinancialInteractionData:
         if self.data is None:
             self.load()
 
-        training = self.data[self.data[DEFAULT_TIMESTAMP_COL] < max_train_date]
+        training = self.data[self.data[DEFAULT_TIMESTAMP_COL] < max_train_date]  # TRAIN split: all rows strictly before max_train_date
         valid = self.data[(self.data[DEFAULT_TIMESTAMP_COL] >= max_train_date) &
-                          (self.data[DEFAULT_TIMESTAMP_COL] < max_valid_date)]
+                  (self.data[DEFAULT_TIMESTAMP_COL] < max_valid_date)]  # VALID split: rows in [max_train_date, max_valid_date)
         test = self.data[(self.data[DEFAULT_TIMESTAMP_COL] >= max_valid_date) &
-                         (self.data[DEFAULT_TIMESTAMP_COL] < max_test_date)]
+                 (self.data[DEFAULT_TIMESTAMP_COL] < max_test_date)]  # TEST split: rows in [max_valid_date, max_test_date)
 
         if self.repeated == False:
             # We remove the items already consumed during training
@@ -162,7 +162,7 @@ class FinancialInteractionData:
             for user in valid[DEFAULT_USER_COL].unique():
                 items_user = set(training[training[DEFAULT_USER_COL] == user][DEFAULT_ITEM_COL].unique().flatten())
                 items_valid_user = set(valid[valid[DEFAULT_USER_COL] == user][DEFAULT_ITEM_COL].unique().flatten())
-                diff = items_valid_user - items_user
+                diff = items_valid_user - items_user  # Validation-only items after excluding assets already consumed in training
                 if len(diff) > 0:
                     user_valid_df = valid[valid[DEFAULT_USER_COL] == user]
                     user_valid_df = user_valid_df[user_valid_df[DEFAULT_ITEM_COL].isin(diff)]
@@ -175,7 +175,7 @@ class FinancialInteractionData:
                 items_user = set(training[training[DEFAULT_USER_COL] == user][DEFAULT_ITEM_COL].unique().flatten())
                 items_valid_user = set(valid[valid[DEFAULT_USER_COL] == user][DEFAULT_ITEM_COL].unique().flatten())
                 items_test_user = set(test[test[DEFAULT_USER_COL] == user][DEFAULT_ITEM_COL].unique().flatten())
-                diff = items_test_user - (items_user | items_valid_user)
+                diff = items_test_user - (items_user | items_valid_user)  # Test-only items after excluding anything seen in train or validation
                 if len(diff) > 0:
                     user_test_df = test[test[DEFAULT_USER_COL] == user]
                     user_test_df = user_test_df[user_test_df[DEFAULT_ITEM_COL].isin(diff)]

@@ -62,14 +62,14 @@ class FinancialContinuousData:
         :param max_date: the maximum possible date.
         :return: the splitted data.
         """
-        time_series = self.time_series.data[self.time_series.data[DEFAULT_TIMESTAMP_COL].between(min_date, max_date)]
-        train, test = self.interactions.split(min_date, rec_date, max_date)
+        time_series = self.time_series.data[self.time_series.data[DEFAULT_TIMESTAMP_COL].between(min_date, max_date)]  # Keep only time-series rows inside the full window that contains both train and test periods
+        train, test = self.interactions.split(min_date, rec_date, max_date)  # Build train/test interaction split using rec_date as the temporal boundary
 
         kpi_series = None
         if self.kpis is not None:
             print(min_date)
             print(max_date)
-            kpi_series = self.kpis[self.kpis[DEFAULT_TIMESTAMP_COL].between(min_date, max_date)]
+            kpi_series = self.kpis[self.kpis[DEFAULT_TIMESTAMP_COL].between(min_date, max_date)]  # Restrict KPI rows to the same global [min_date, max_date] window as train+test
 
         customers, assets, time_series, train, valid, test = data_filter.filter(self.customers, time_series, train, None, test, rec_date)
 
@@ -92,13 +92,13 @@ class FinancialContinuousData:
         :param data_filter: filters the data after the split.
         :return: the splitted data.
         """
-        time_series = self.time_series.data[self.time_series.data[DEFAULT_TIMESTAMP_COL].between(min_date, max_date)]
-        train, valid = self.interactions.split(min_date, valid_date, rec_date)
-        aux_valid, test = self.interactions.split(valid_date, rec_date, max_date)
+        time_series = self.time_series.data[self.time_series.data[DEFAULT_TIMESTAMP_COL].between(min_date, max_date)]  # Keep only rows in the full train+valid+test range
+        train, valid = self.interactions.split(min_date, valid_date, rec_date)  # First split: train in [min_date, valid_date), valid in [valid_date, rec_date]
+        aux_valid, test = self.interactions.split(valid_date, rec_date, max_date)  # Second split: train-like aux slice [valid_date, rec_date), test in [rec_date, max_date]
 
         kpi_series = None
         if self.kpis is not None:
-            kpi_series = self.kpis[self.kpis[DEFAULT_TIMESTAMP_COL].between(min_date, max_date)]
+            kpi_series = self.kpis[self.kpis[DEFAULT_TIMESTAMP_COL].between(min_date, max_date)]  # Match KPI rows to the same temporal window used for split data
 
         customers, assets, time_series, train, valid, test = data_filter.filter(self.customers, time_series, train, valid, test, rec_date)
 

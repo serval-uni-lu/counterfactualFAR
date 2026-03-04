@@ -20,16 +20,16 @@ class RatingsNotInTrain(RatingFilter):
     """
     def filter(self, time_series: pd.DataFrame, train: pd.DataFrame, valid: pd.DataFrame, test: pd.DataFrame) -> \
             Tuple[pd.DataFrame, Optional[pd.DataFrame], pd.DataFrame]:
-        ratings_train = train.copy()
-        ratings_valid = valid.copy() if valid is not None else None
-        ratings_test = test.copy()
+        ratings_train = train.copy()  # TRAIN split baseline
+        ratings_valid = valid.copy() if valid is not None else None  # VALID split baseline (if provided)
+        ratings_test = test.copy()  # TEST split baseline
 
         if ratings_valid is not None:
-            ratings_valid = self.clean(ratings_train, ratings_valid)
-            ratings_test = self.clean(ratings_train, ratings_test)
-            ratings_test = self.clean(ratings_valid, ratings_test)
+            ratings_valid = self.clean(ratings_train, ratings_valid)  # Remove train-seen user-item pairs from VALID split
+            ratings_test = self.clean(ratings_train, ratings_test)  # Remove train-seen user-item pairs from TEST split
+            ratings_test = self.clean(ratings_valid, ratings_test)  # Remove valid-seen user-item pairs from TEST split
         else:
-            ratings_test = self.clean(ratings_train, ratings_test)
+            ratings_test = self.clean(ratings_train, ratings_test)  # Remove train-seen user-item pairs from TEST split
 
         return ratings_train, ratings_valid, ratings_test
 
