@@ -48,7 +48,7 @@ class ProfitabilityPrediction(Algorithm):
         super().__init__(data)
 
         self.kpis = data.kpis
-        self.months = int(months) # CHANGED
+        self.months = int(months)
         self.indicators = indicators
         self.model = model
         self.train_examples_per_asset = train_examples_per_asset
@@ -56,7 +56,6 @@ class ProfitabilityPrediction(Algorithm):
         self.save_for_testing = save_for_testing
         self.training_sizes_path = training_sizes_path
 
-    # CHANGED: added functions
     def _model_tag(self):
         if isinstance(self.model, MLPKPIModel):
             return "mlp"
@@ -93,9 +92,6 @@ class ProfitabilityPrediction(Algorithm):
         n_estimators = getattr(self.model, "n_estimators", "na")
         return self._safe_fragment(f"n-{n_estimators}")
 
-    def _artifact_label(self, when):
-        return f"{self._safe_fragment(when)}_{self._model_param_tag()}"
-
     def _dataset_artifact_label(self, when):
         return self._safe_fragment(when)
 
@@ -103,7 +99,10 @@ class ProfitabilityPrediction(Algorithm):
         return f"for_testing/{prefix}_{self._safe_fragment(when)}_{self._model_tag()}_{self._model_param_tag()}.{extension}"
 
     def _dataset_artifact_path(self, prefix, when, extension="csv"):
-        return f"for_testing/{prefix}_{self._safe_fragment(when)}_{self._model_tag()}.{extension}"
+        dataset_tag = self._model_tag()
+        if isinstance(self.model, RFRKPIModel):
+            dataset_tag = "rfr_internal_kpis"
+        return f"for_testing/{prefix}_{self._safe_fragment(when)}_{dataset_tag}.{extension}"
 
     def _save_csv_if_missing(self, df, path):
         if not os.path.exists(path):
@@ -177,34 +176,13 @@ class ProfitabilityPrediction(Algorithm):
         if not (hasattr(self.model, "predict_with_kpis") or hasattr(self.model, "predict")):
             raise ValueError("Internal model contract violation: missing predict(...) or predict_with_kpis(...) method")
 
-    def _compute_targets_from_kpi_df(self, kpi_df):
-        asset_dfs = []
-        for asset in kpi_df[DEFAULT_ITEM_COL].unique():
-            asset_df = kpi_df[kpi_df[DEFAULT_ITEM_COL] == asset].sort_values(by=DEFAULT_TIMESTAMP_COL, ascending=True).copy()
-            asset_df["final_price"] = asset_df[DEFAULT_RATING_COL].shift(-self.months * 21)
-            asset_df["target"] = (asset_df["final_price"] - asset_df[DEFAULT_RATING_COL]) / asset_df[DEFAULT_RATING_COL]
-            asset_df = asset_df[asset_df[DEFAULT_RATING_COL] > 0.0]
-            asset_dfs.append(asset_df[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]])
-
-        if len(asset_dfs) == 0:
-            return pd.DataFrame(columns=[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"])
-
-        targets_df = pd.concat(asset_dfs)
-        return targets_df.dropna(subset=["target"])
-
-    def _snapshot_internal_training_rows(self, kpis_df, targets_df):
-        merged = kpis_df.merge(targets_df, on=[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL], how="inner")
-        columns = [x for x in self.indicators if x in merged.columns]
-        columns += ["target", DEFAULT_TIMESTAMP_COL, DEFAULT_ITEM_COL]
-        return merged[columns].dropna()
-
     def _snapshot_internal_time_series_rows(self, time_series_df, targets_df):
         target_cols = [DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]
         keys = targets_df[target_cols].drop_duplicates()
         snapshot = keys.merge(time_series_df, on=[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL], how="inner")
         return snapshot
     
-    def train(self, train_date): # CHANGED
+    def train(self, train_date):
         self._validate_internal_model_contract()
 
         # This is the maximum training date. Meaning that no future information is considered here.
@@ -217,7 +195,7 @@ class ProfitabilityPrediction(Algorithm):
 
         # As a first step, we find the technical indicators. We use all the possible information previous
         # to the training date - the number of months we are considering.
-        if self.kpis is None and isinstance(self.model, INTERNAL_KPI_MODELS):
+        if isinstance(self.model, INTERNAL_KPI_MODELS):
             source_kpis = self._generate_internal_kpis(time_series_df)
         else:
             source_kpis = self.kpis
@@ -229,7 +207,7 @@ class ProfitabilityPrediction(Algorithm):
         # For each asset, we get the target (profitability at k months)
         asset_dfs = []
         for asset in kpi_indicators[DEFAULT_ITEM_COL].unique():
-            asset_df = kpi_indicators[kpi_indicators[DEFAULT_ITEM_COL] == asset]
+            asset_df = kpi_indicators[kpi_indicators[DEFAULT_ITEM_COL] == asset].copy()
             asset_df["final_price"] = asset_df[DEFAULT_RATING_COL].shift(-self.months * 21)
             asset_df["target"] = (asset_df["final_price"] - asset_df[DEFAULT_RATING_COL]) / (asset_df[DEFAULT_RATING_COL])
             asset_df = asset_df[asset_df[DEFAULT_RATING_COL] > 0.0]
@@ -238,8 +216,8 @@ class ProfitabilityPrediction(Algorithm):
 
         # Finally, we filter the indicators by date.
         full = kpi_indicators.copy()
-        kpi_indicators = full[full[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]
-        kpi_indicators_test = full[full[DEFAULT_TIMESTAMP_COL] >= (train_date - delta)]
+        kpi_indicators = full[full[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]  # TRAIN rows: only timestamps strictly before the training cutoff (train_date - prediction horizon)
+        kpi_indicators_test = full[full[DEFAULT_TIMESTAMP_COL] >= (train_date - delta)]  # TEST/EVAL rows: timestamps on/after the cutoff
 
         aux_list = self.indicators.copy()
         aux_list.append(DEFAULT_ITEM_COL)
@@ -265,11 +243,11 @@ class ProfitabilityPrediction(Algorithm):
         kpi_indicators_test = kpi_indicators_test[aux_list_test]
         kpi_indicators_test = kpi_indicators_test.dropna()
 
-        if kpi_indicators_features.shape[0] > 0:  # CHANGED
+        if kpi_indicators_features.shape[0] > 0:
             self._save_training_size(train_date, kpi_indicators_features.shape[0])
-            # Check if model internally generates KPIs
+            # Internal models are trained from raw time-series + aligned targets.
             if isinstance(self.model, INTERNAL_KPI_MODELS):
-                training_time_series = time_series_df[time_series_df[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]
+                training_time_series = time_series_df[time_series_df[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]  # Internal-model train split over raw time-series (same temporal cutoff as KPI train rows)
                 train_targets = training_data[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]]
                 device = "cuda" if torch.cuda.is_available() else "cpu"
                 if isinstance(self.model, TabNetKPIModel):
@@ -308,7 +286,7 @@ class ProfitabilityPrediction(Algorithm):
                         artifact_label=self._dataset_artifact_label(train_date) if self.save_for_testing else None,
                     )
             else:
-                # For sklearn models (backward compatibility)
+                # External (precomputed-KPI) models are trained directly on KPI features.
                 self.model.fit(kpi_indicators_features, goals)
             
             self.is_fitted = True
@@ -318,8 +296,8 @@ class ProfitabilityPrediction(Algorithm):
                 # Save to CSV
                 if isinstance(self.model, INTERNAL_KPI_MODELS):
                     training_data_ts = self._snapshot_internal_time_series_rows(training_time_series, train_targets)
-                    testing_targets = kpi_indicators_test[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]]
-                    testing_data_ts = self._snapshot_internal_time_series_rows(time_series_df, testing_targets)
+                    testing_targets = kpi_indicators_test[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]]  # Test target anchors (asset, timestamp, target) for post-train evaluation/export
+                    testing_data_ts = self._snapshot_internal_time_series_rows(time_series_df, testing_targets)  # Raw time-series rows aligned to test anchors
                     self._save_csv_if_missing(training_data_ts, self._dataset_artifact_path("training_data", train_date))
                     self._save_csv_if_missing(testing_data_ts, self._dataset_artifact_path("testing_data", train_date))
                 else:
@@ -328,7 +306,7 @@ class ProfitabilityPrediction(Algorithm):
                 self.save_fitted_model(train_date)
 
 
-    def save_fitted_model(self, train_date): # ADDED
+    def save_fitted_model(self, train_date):
         self._validate_internal_model_contract()
 
         def _move_unregistered_tensors(module, device):
@@ -479,8 +457,7 @@ class ProfitabilityPrediction(Algorithm):
                 from skl2onnx import convert_sklearn
                 from skl2onnx.common.data_types import FloatTensorType
                 initial_type = [('float_input', FloatTensorType([None, len(self.indicators)]))]
-                sklearn_model = self.model.model if isinstance(self.model, RFRKPIModel) else self.model
-                onnx_model = convert_sklearn(sklearn_model, initial_types=initial_type)
+                onnx_model = convert_sklearn(self.model, initial_types=initial_type)
                 with open(self._artifact_path("profitability_recommendation", train_date, "onnx"), "wb") as f:
                     f.write(onnx_model.SerializeToString())
         else:
@@ -492,30 +469,33 @@ class ProfitabilityPrediction(Algorithm):
         fields.append(DEFAULT_ITEM_COL)
         fields.append(DEFAULT_TIMESTAMP_COL)
         prediction_input_snapshot = None
+        prediction_time_series = None
 
         # We first obtain KPI rows at recommendation time.
-        if self.kpis is None and isinstance(self.model, INTERNAL_KPI_MODELS):
-            if isinstance(self.model, RFRKPIModel):
-                kpi_indicators = self.data.time_series[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]].copy()
+        if isinstance(self.model, INTERNAL_KPI_MODELS):
+            prediction_time_series = self.data.time_series[
+                self.data.time_series[DEFAULT_ITEM_COL].isin(self.data.assets)
+            ]
+            prediction_time_series = prediction_time_series[
+                prediction_time_series[DEFAULT_TIMESTAMP_COL] <= rec_time
+            ]  # Recommendation-time cutoff: never expose future rows to internal KPI generation.
+            if self.is_fitted:
+                # For fitted internal models, get KPI rows from the model prediction path to avoid computing KPIs twice.
+                kpi_indicators = None
             else:
-                prediction_time_series = self.data.time_series[
-                    self.data.time_series[DEFAULT_ITEM_COL].isin(self.data.assets)
-                ]
+                # If not fitted, we still need KPI rows to build random baselines.
                 kpis_all = self._generate_internal_kpis(prediction_time_series)
                 kpi_indicators = kpis_all[fields]
         else:
             kpi_indicators = self.kpis[fields]
 
-        kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_TIMESTAMP_COL] == rec_time]
-        kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_ITEM_COL].isin(self.data.assets)]
-        kpi_indicators = kpi_indicators.drop_duplicates(subset=[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL])
+        if kpi_indicators is not None:
+            kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_TIMESTAMP_COL] == rec_time]
+            kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_ITEM_COL].isin(self.data.assets)]
 
         # Then, we obtain the recommendation scores:
         if self.is_fitted:
             if isinstance(self.model, INTERNAL_KPI_MODELS):
-                prediction_time_series = self.data.time_series[
-                    self.data.time_series[DEFAULT_ITEM_COL].isin(self.data.assets)
-                ]
                 if hasattr(self.model, "predict_with_kpis") and not isinstance(self.model, RFRKPIModel):
                     kpis_df, predictions = self.model.predict_with_kpis(prediction_time_series)
                 else:
@@ -537,13 +517,7 @@ class ProfitabilityPrediction(Algorithm):
                     (kpis_df[DEFAULT_TIMESTAMP_COL] == rec_time)
                     & (kpis_df[DEFAULT_ITEM_COL].isin(self.data.assets))
                 ]
-                score_df = kpis_df[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "score"]].copy()
-                kpi_indicators = kpi_indicators.merge(
-                    score_df,
-                    on=[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL],
-                    how="left",
-                )
-                kpi_indicators["score"] = kpi_indicators["score"].fillna(0.0)
+                kpi_indicators = kpis_df[fields + ["score"]].copy()
 
                 feature_cols = [col for col in self.indicators if col in kpi_indicators.columns]
                 prediction_input_snapshot = kpi_indicators[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL] + feature_cols].copy()
@@ -582,7 +556,7 @@ class ProfitabilityPrediction(Algorithm):
             kpi_indicators[[DEFAULT_ITEM_COL, "score"]]
             .sort_values(by="score", ascending=False)
             .rename(columns={"score": DEFAULT_RATING_COL})
-        ) # number of items at rec_time
+        )
 
         user_recommendations = []
         user_recs_full = []
