@@ -28,11 +28,11 @@ DEFAULT_TRAINING = Path("for_testing/training_data_2020-08-28_00-00-00_rfr_inter
 DEFAULT_TESTING = Path("for_testing/testing_data_2020-08-28_00-00-00_rfr_internal_kpis.csv")
 DEFAULT_CF_OUT = Path("results/counterfactuals/rfr_pkl_ts_counterfactuals.csv")
 DEFAULT_SUMMARY_OUT = Path("results/counterfactuals/rfr_pkl_ts_counterfactuals_summary.csv")
-DEFAULT_LOWEST_K = 10
 FIXED_WINDOW_SIZE = 21
 DEFAULT_MAX_REFERENCE_WINDOWS = 30
 DEFAULT_DICE_METHOD = "random"
 PREDICT_PROGRESS_EVERY = 25
+MIN_POSITIVE_UPLIFT = 1e-6
 
 
 def _load_model(model_path: Path):
@@ -60,34 +60,13 @@ def _validate_ts(df: pd.DataFrame, name: str):
         raise ValueError(f"{name} must contain {sorted(needed)}; missing={sorted(missing)}")
 
 
-def _default_window_size(model) -> int:
-    """Mirror export-time window sizing for end-to-end consistency."""
-
-    # Align with MAKPIGenerator logic used by the internal RFR path:
-    # only exact "short" uses [21,63,126], all other KPI types use [21,63,126,189].
-    kpi_type = str(getattr(model, "kpi_type", "full_short")).lower()
-    k = int(getattr(model, "k", 5))
-    periods = [21, 63, 126] if kpi_type == "short" else [21, 63, 126, 189]
-    min_len = max(periods) + k
-    return max(160, min_len)
-
-
-def _default_range_from_targets(target_series: pd.Series) -> tuple[float, float]:
-    """Compute desired range defaults from target values.
-
-    Rules:
-    - desired_min = max(min_target, 0.0)
-    - desired_max = max_target * 1.10
-    - ensure desired_max > desired_min
-    """
-    min_target = float(target_series.min())
-    max_target = float(target_series.max())
-
-    desired_min = max(min_target, 0.0)
-    desired_max = max_target * 1.10
-    if desired_max <= desired_min:
-        desired_max = desired_min + 0.10
-    return desired_min, desired_max
+def validate_no_future_data(df, max_date, context_name):
+    future_dates = df[df[DEFAULT_TIMESTAMP_COL] > max_date]
+    if not future_dates.empty:
+        print(f"WARNING: {context_name} contains {len(future_dates)} future dates!")
+        print(f"First future date: {future_dates[DEFAULT_TIMESTAMP_COL].min()}")
+        return False
+    return True
 
 
 def build_window_dataset(
@@ -307,116 +286,106 @@ class RFRPKLWindowWrapper:
         return np.asarray(preds, dtype=np.float64)
 
 
+def _build_kpi_predictions(model, series_df: pd.DataFrame, recommend_date: pd.Timestamp) -> pd.DataFrame:
+    """Generate KPI rows and model predictions from all rows up to recommend_date."""
+
+    history_cut = series_df[series_df[DEFAULT_TIMESTAMP_COL] <= recommend_date].copy()
+    validate_no_future_data(history_cut, recommend_date, "history_cut_before_kpi_generation")
+    if history_cut.empty:
+        raise ValueError("No rows available on or before recommend-date")
+
+    kpis_df = model._generate_kpis_df(history_cut)
+    if kpis_df is None or kpis_df.empty:
+        raise ValueError("Internal KPI generation returned no rows for the selected recommend-date")
+
+    missing = [col for col in model.kpi_features if col not in kpis_df.columns]
+    if missing:
+        raise ValueError(f"Missing KPI feature columns for prediction: {missing}")
+
+    preds = model.model.predict(kpis_df[model.kpi_features])
+    scored = kpis_df[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]].copy()
+    scored["prediction"] = np.asarray(preds, dtype=np.float64)
+    return scored
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Generate time-series counterfactuals from internal RFR .pkl model")
+    parser = argparse.ArgumentParser(
+        description="Generate RFR counterfactuals at a recommendation date (no target required)"
+    )
     parser.add_argument("--model-pkl", type=Path, default=DEFAULT_MODEL_PKL)
     parser.add_argument("--training", type=Path, default=DEFAULT_TRAINING)
     parser.add_argument("--testing", type=Path, default=DEFAULT_TESTING)
+    parser.add_argument("--asset-id", type=str, default=None, help="Optional single asset to process")
     parser.add_argument("--window-size", type=int, default=None)
-    parser.add_argument("--query-index", type=int, default=200)
     parser.add_argument("--n-jobs", type=int, default=1)
     parser.add_argument("--method", type=str, default=DEFAULT_DICE_METHOD, choices=["genetic", "random", "kdtree"])
     parser.add_argument("--maxiterations", type=int, default=3)
+    parser.add_argument("--total-cfs", type=int, default=1)
     parser.add_argument(
         "--max-reference-windows",
         type=int,
         default=DEFAULT_MAX_REFERENCE_WINDOWS,
         help="Maximum number of reference windows used by DiCE per query (<=0 disables cap)",
     )
-    parser.add_argument("--desired-min", type=float, default=None)
-    parser.add_argument("--desired-max", type=float, default=None)
+    parser.add_argument(
+        "--desired-max",
+        type=float,
+        default=None,
+        help="Optional global upper bound for desired prediction range",
+    )
     parser.add_argument("--out-cf", type=Path, default=DEFAULT_CF_OUT)
     parser.add_argument("--out-summary", type=Path, default=DEFAULT_SUMMARY_OUT)
     args = parser.parse_args()
 
     model = _load_model(args.model_pkl)
 
-    train_ts = pd.read_csv(args.training)
-    test_ts = pd.read_csv(args.testing)
-    _validate_ts(train_ts, "training")
-    _validate_ts(test_ts, "testing")
+    training_ts = pd.read_csv(args.training)
+    _validate_ts(training_ts, "training")
+    training_ts[DEFAULT_TIMESTAMP_COL] = pd.to_datetime(training_ts[DEFAULT_TIMESTAMP_COL])
+    training_ts = training_ts.sort_values([DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]).reset_index(drop=True)
 
-    # Normalize timestamp dtype for deterministic filtering/joins.
-    train_ts[DEFAULT_TIMESTAMP_COL] = pd.to_datetime(train_ts[DEFAULT_TIMESTAMP_COL])
-    test_ts[DEFAULT_TIMESTAMP_COL] = pd.to_datetime(test_ts[DEFAULT_TIMESTAMP_COL])
+    testing_ts = pd.read_csv(args.testing)
+    _validate_ts(testing_ts, "testing")
+    testing_ts[DEFAULT_TIMESTAMP_COL] = pd.to_datetime(testing_ts[DEFAULT_TIMESTAMP_COL])
+    testing_ts = testing_ts.sort_values([DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]).reset_index(drop=True)
 
     if args.window_size is not None and int(args.window_size) != FIXED_WINDOW_SIZE:
         raise ValueError(f"This script is fixed to window-size={FIXED_WINDOW_SIZE}")
 
     window_size = FIXED_WINDOW_SIZE
     window_cols = [f"w_{i}" for i in range(window_size)]
-    test_windows = build_window_dataset(test_ts, window_size, query_df=test_ts)
-    train_windows = build_window_dataset(train_ts, window_size)
     print(f"Using fixed window-size={window_size}")
 
-    # Use full observed history (train + test) and rely on timestamp cutoff in
-    # set_query_context() to avoid leakage from future rows.
-    full_ts = pd.concat([train_ts, test_ts], ignore_index=True)
-    full_ts[DEFAULT_TIMESTAMP_COL] = pd.to_datetime(full_ts[DEFAULT_TIMESTAMP_COL])
-    full_ts = full_ts.sort_values([DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]).reset_index(drop=True)
+    full_history = pd.concat([training_ts, testing_ts], ignore_index=True)
+    full_history = full_history.drop_duplicates(subset=[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, DEFAULT_RATING_COL])
+    full_history = full_history.sort_values([DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]).reset_index(drop=True)
+    max_test_ts = testing_ts[DEFAULT_TIMESTAMP_COL].max()
+    validate_no_future_data(full_history, max_test_ts, "full_history")
 
-    if "target" not in train_windows.columns:
-        raise ValueError("Training windows need 'target' for DiCE outcome construction")
+    query_rows = testing_ts.copy()
+    if query_rows.empty:
+        raise ValueError("No rows in --testing; cannot build factual windows")
 
-    dice_train = train_windows[window_cols + ["target", DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]].dropna(subset=["target"]).copy()
-    print(f"Constructed {len(dice_train)} training windows for DiCE.")
-    if dice_train.empty:
-        raise ValueError("No training rows available for DiCE after dropna on target")
+    if args.asset_id is not None:
+        query_rows = query_rows[query_rows[DEFAULT_ITEM_COL] == args.asset_id].copy()
+        if query_rows.empty:
+            raise ValueError(f"No query rows found for asset-id={args.asset_id} in --testing")
 
-    if args.query_index < 0:
-        raise ValueError("query-index must be >= 0")
-
-    query_windows = test_windows[test_windows["query_index_original"] == args.query_index]
-    query_windows = query_windows.sort_values("query_index_original").reset_index(drop=True)
+    query_windows = build_window_dataset(full_history, window_size, query_df=query_rows)
     if query_windows.empty:
-        # Fallback: interpret query-index as positional index over valid windows.
-        # cannot build a full window due to insufficient history.
-        if len(test_windows) == 0:
-            raise ValueError("No valid test windows were constructed. Adjust window-size or input data.")
+        raise ValueError("No valid query windows in --testing")
 
-        if args.query_index >= len(test_windows):
-            raise ValueError(
-                f"query-index {args.query_index} out of positional range [0, {len(test_windows)-1}] "
-                "for valid test windows"
-            )
-
-        query_windows = test_windows.iloc[[args.query_index]].copy().reset_index(drop=True)
-        print(
-            "Requested original index is unavailable after window construction; "
-            "falling back to positional selection over valid windows "
-            f"[{args.query_index}]."
-        )
-
-    # Configure desired ranges
-    user_fixed_range = args.desired_min is not None and args.desired_max is not None
-    if (args.desired_min is None) != (args.desired_max is None):
-        raise ValueError("Provide both --desired-min and --desired-max, or neither")
-
-    if user_fixed_range:
-        global_desired_min = float(args.desired_min)
-        global_desired_max = float(args.desired_max)
-    else:
-        global_desired_min, global_desired_max = _default_range_from_targets(dice_train["target"])
-
-    per_asset_ranges = {}
-    if not user_fixed_range:
-        # Build asset-specific defaults so each asset can use its own target scale.
-        asset_targets = dice_train[[DEFAULT_ITEM_COL, "target"]].dropna(subset=["target"])
-        for asset_id, group in asset_targets.groupby(DEFAULT_ITEM_COL):
-            per_asset_ranges[asset_id] = _default_range_from_targets(group["target"])
-
-    # Configure DiCE + predictor
     n_jobs = os.cpu_count() if int(args.n_jobs) == -1 else int(args.n_jobs)
-    wrapper = RFRPKLWindowWrapper(model, window_cols, full_time_series=full_ts, n_jobs=max(1, n_jobs))
-
+    wrapper = RFRPKLWindowWrapper(model, window_cols, full_time_series=full_history, n_jobs=max(1, n_jobs))
     dice_model = dice_ml.Model(model=wrapper, backend="sklearn", model_type="regressor")
 
-    # Initialize output files (overwrite old run), then append rows as they are generated.
     args.out_cf.parent.mkdir(parents=True, exist_ok=True)
     args.out_summary.parent.mkdir(parents=True, exist_ok=True)
 
     prediction_columns = [
         "query_index",
+        DEFAULT_ITEM_COL,
+        DEFAULT_TIMESTAMP_COL,
         "cf_index",
         "factual_prediction",
         "cf_prediction",
@@ -425,6 +394,8 @@ def main():
     ]
     window_columns = [
         "query_index",
+        DEFAULT_ITEM_COL,
+        DEFAULT_TIMESTAMP_COL,
         "cf_index",
         "row_type",
         "window_line",
@@ -433,180 +404,92 @@ def main():
     pd.DataFrame(columns=prediction_columns).to_csv(args.out_cf, index=False)
     pd.DataFrame(columns=window_columns).to_csv(args.out_summary, index=False)
 
-    # Generate CFs per query
+    print(f"Found {len(query_windows)} query windows from --testing")
+
     for _, query_row in query_windows.iterrows():
         query_row = query_row.to_frame().T.copy()
         q_idx = int(query_row.iloc[0]["query_index_original"])
+        query_asset_id = query_row.iloc[0][DEFAULT_ITEM_COL]
+        query_rec_time = pd.to_datetime(query_row.iloc[0][DEFAULT_TIMESTAMP_COL])
         query_x = query_row[window_cols]
 
-        print(f"Starting query-index {q_idx} | method={args.method} | window_size={window_size}", flush=True)
-        if DEFAULT_ITEM_COL in query_row.columns and DEFAULT_TIMESTAMP_COL in query_row.columns:
-            print(
-                "Processing query window for "
-                f"asset={query_row.iloc[0][DEFAULT_ITEM_COL]} "
-                f"timestamp={query_row.iloc[0][DEFAULT_TIMESTAMP_COL]}",
-                flush=True,
-            )
+        print(
+            f"Starting query-index {q_idx} | asset={query_asset_id} | "
+            f"timestamp={query_rec_time} | method={args.method}",
+            flush=True,
+        )
 
-        # Set real internal-RFR context for this query (asset history up to timestamp).
-        context_is_set = False
-        if DEFAULT_ITEM_COL in query_row.columns and DEFAULT_TIMESTAMP_COL in query_row.columns:
-            try:
-                wrapper.set_query_context(
-                    query_row.iloc[0][DEFAULT_ITEM_COL],
-                    query_row.iloc[0][DEFAULT_TIMESTAMP_COL],
-                )
-                context_is_set = True
-            except ValueError as error:
-                # Auto-skip to the next valid test query index under test-only history.
-                fallback_row = None
-                later_candidates = test_windows[
-                    test_windows["query_index_original"] > q_idx
-                ].sort_values("query_index_original")
+        wrapper.set_query_context(query_asset_id, query_rec_time)
 
-                for _, candidate in later_candidates.iterrows():
-                    try:
-                        wrapper.set_query_context(
-                            candidate[DEFAULT_ITEM_COL],
-                            candidate[DEFAULT_TIMESTAMP_COL],
-                        )
-                        fallback_row = candidate.to_frame().T.copy()
-                        context_is_set = True
-                        break
-                    except ValueError:
-                        continue
+        history_up_to_query = full_history[full_history[DEFAULT_TIMESTAMP_COL] <= query_rec_time].copy()
+        validate_no_future_data(history_up_to_query, query_rec_time, "history_up_to_query")
+        if history_up_to_query.empty:
+            print(f"Skipping query-index {q_idx}: no history available up to query timestamp")
+            continue
 
-                used_first_valid_fallback = False
-                if fallback_row is None:
-                    # If there is no later valid query, fallback to the first valid query overall.
-                    first_valid_row = None
-                    all_candidates = test_windows.sort_values("query_index_original")
-                    for _, candidate in all_candidates.iterrows():
-                        try:
-                            wrapper.set_query_context(
-                                candidate[DEFAULT_ITEM_COL],
-                                candidate[DEFAULT_TIMESTAMP_COL],
-                            )
-                            first_valid_row = candidate.to_frame().T.copy()
-                            context_is_set = True
-                            break
-                        except ValueError:
-                            continue
+        kpi_scored = _build_kpi_predictions(model, history_up_to_query, query_rec_time)
 
-                    if first_valid_row is None:
-                        raise ValueError(
-                            f"Selected query-index {q_idx} cannot be evaluated with test-only history: {error}. "
-                            "No valid test query-index has enough history for internal RFR context."
-                        ) from error
+        reference_rows = history_up_to_query[history_up_to_query[DEFAULT_TIMESTAMP_COL] < query_rec_time].copy()
+        if reference_rows.empty:
+            print(f"Skipping query-index {q_idx}: no historical rows before query timestamp")
+            continue
 
-                    fallback_row = first_valid_row
-                    used_first_valid_fallback = True
+        reference_windows = build_window_dataset(history_up_to_query, window_size, query_df=reference_rows)
+        reference_windows = reference_windows.merge(
+            kpi_scored,
+            on=[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL],
+            how="inner",
+        )
+        reference_windows = reference_windows.dropna(subset=["prediction"])
+        if reference_windows.empty:
+            print(f"Skipping query-index {q_idx}: reference windows could not be aligned with predictions")
+            continue
 
-                new_q_idx = int(fallback_row.iloc[0]["query_index_original"])
-                if used_first_valid_fallback:
-                    print(
-                        f"Selected query-index {q_idx} lacks required test-only history and no later valid query exists; "
-                        f"using first valid query-index {new_q_idx}."
-                    )
-                else:
-                    print(
-                        f"Selected query-index {q_idx} lacks required test-only history; "
-                        f"using next valid query-index {new_q_idx}."
-                    )
-                query_row = fallback_row
-                q_idx = new_q_idx
-                query_x = query_row[window_cols]
+        factual_pred = float(wrapper.predict(query_x)[0])
+        desired_min = factual_pred + MIN_POSITIVE_UPLIFT
 
-        if not context_is_set and DEFAULT_ITEM_COL in query_row.columns and DEFAULT_TIMESTAMP_COL in query_row.columns:
-            wrapper.set_query_context(
-                query_row.iloc[0][DEFAULT_ITEM_COL],
-                query_row.iloc[0][DEFAULT_TIMESTAMP_COL],
-            )
-
-        # Baseline prediction on untouched contextual time series (internal-RFR path).
-        try:
-            factual_pred = float(wrapper.predict(query_x)[0])
-        except ValueError as error:
-            raise ValueError(
-                f"Failed to score factual query-index {q_idx} with internal RFR under rec-time context: {error}"
-            ) from error
-
-        # Use fixed global range or per-asset defaults with global fallback.
-        if user_fixed_range:
-            desired_min = global_desired_min
-            desired_max = global_desired_max
+        if args.desired_max is None:
+            asset_ref_max = reference_windows[
+                reference_windows[DEFAULT_ITEM_COL] == query_asset_id
+            ]["prediction"].max()
+            if pd.isna(asset_ref_max):
+                asset_ref_max = reference_windows["prediction"].max()
+            desired_max = max(float(asset_ref_max), desired_min + MIN_POSITIVE_UPLIFT)
         else:
-            asset_id = query_row.iloc[0][DEFAULT_ITEM_COL] if DEFAULT_ITEM_COL in query_row.columns else None
-            desired_min, desired_max = per_asset_ranges.get(asset_id, (global_desired_min, global_desired_max))
-
-            # In auto-range mode, enforce non-decreasing counterfactual objectives.
-            # Otherwise DiCE may be forced to return lower-scoring CFs if the learned
-            # per-asset range upper bound is below the current factual prediction.
-            desired_min = max(desired_min, factual_pred)
+            desired_max = float(args.desired_max)
             if desired_max <= desired_min:
-                desired_max = desired_min + 0.10
+                desired_max = desired_min + MIN_POSITIVE_UPLIFT
 
-        cf_kwargs = {
-            "total_CFs": 1,
-            "desired_range": [desired_min, desired_max],
-        }
-
-        factual_values = query_row.iloc[0][window_cols].astype(float).values
-        k_lowest = max(1, min(int(DEFAULT_LOWEST_K), window_size))
-        selected_idx = np.argpartition(factual_values, kth=k_lowest - 1)[:k_lowest]
-        selected_idx = np.sort(selected_idx)
-        features_to_vary = [window_cols[int(i)] for i in selected_idx]
-        vary_label = f"lowest-{k_lowest}"
-        cf_kwargs["features_to_vary"] = features_to_vary
-
-        if args.method == "genetic":
-            cf_kwargs["maxiterations"] = int(args.maxiterations)
-
-        # Build query-specific DiCE reference set: same asset, strictly before rec-time.
-        query_asset_id = query_row.iloc[0][DEFAULT_ITEM_COL] if DEFAULT_ITEM_COL in query_row.columns else None
-        query_rec_time = pd.to_datetime(query_row.iloc[0][DEFAULT_TIMESTAMP_COL]) if DEFAULT_TIMESTAMP_COL in query_row.columns else None
-        if query_asset_id is not None:
-            dice_train_query = dice_train[dice_train[DEFAULT_ITEM_COL] == query_asset_id].copy()
-            if dice_train_query.empty:
-                print(
-                    f"No training windows for asset={query_asset_id}; "
-                    "falling back to global training reference set."
-                )
-                dice_train_query = dice_train.copy()
-        else:
-            dice_train_query = dice_train.copy()
-
-        if query_rec_time is not None:
-            dice_train_query = dice_train_query[dice_train_query[DEFAULT_TIMESTAMP_COL] < query_rec_time].copy()
-            if dice_train_query.empty:
-                raise ValueError(
-                    f"No historical training windows available before rec-time={query_rec_time} "
-                    f"for query-index {q_idx}."
-                )
+        dice_train_query = reference_windows[
+            (reference_windows[DEFAULT_ITEM_COL] == query_asset_id)
+            & (reference_windows[DEFAULT_TIMESTAMP_COL] < query_rec_time)
+        ].copy()
+        if dice_train_query.empty:
+            dice_train_query = reference_windows[
+                reference_windows[DEFAULT_TIMESTAMP_COL] < query_rec_time
+            ].copy()
+        if dice_train_query.empty:
+            print(f"Skipping query-index {q_idx}: no reference windows before recommendation time")
+            continue
 
         max_reference_windows = int(args.max_reference_windows)
         if max_reference_windows > 0 and len(dice_train_query) > max_reference_windows:
-            before_cap = len(dice_train_query)
             dice_train_query = dice_train_query.tail(max_reference_windows).copy()
-            print(
-                f"Capped reference windows for query-index {q_idx}: "
-                f"{before_cap} -> {len(dice_train_query)} (most recent rows)"
-            )
 
-        print(
-            f"Total windows for query-index {q_idx}: {len(dice_train_query)} "
-            f"(reference set filtered to asset={query_asset_id}, rec-time={query_rec_time})"
-        )
-        print(
-            f"Features allowed to vary for query-index {q_idx}: {len(features_to_vary)}/{window_size} "
-            f"({vary_label})"
-        )
         dice_data_query = dice_ml.Data(
-            dataframe=dice_train_query[window_cols + ["target"]],
+            dataframe=dice_train_query[window_cols + ["prediction"]],
             continuous_features=window_cols,
-            outcome_name="target",
+            outcome_name="prediction",
         )
         exp_query = Dice(dice_data_query, dice_model, method=args.method)
+
+        cf_kwargs = {
+            "total_CFs": int(args.total_cfs),
+            "desired_range": [desired_min, desired_max],
+            "features_to_vary": list(window_cols),
+        }
+        if args.method == "genetic":
+            cf_kwargs["maxiterations"] = int(args.maxiterations)
 
         t0 = time.time()
         dice_exp = exp_query.generate_counterfactuals(query_x, **cf_kwargs)
@@ -617,7 +500,6 @@ def main():
             continue
 
         for cf_idx, (_, cf_row) in enumerate(final_cfs.iterrows()):
-            # Re-score each generated window through the same wrapper path.
             cf_x = pd.DataFrame([cf_row[window_cols].to_dict()])
             cf_pred = float(wrapper.predict(cf_x)[0])
 
@@ -626,6 +508,8 @@ def main():
 
             prediction_row = {
                 "query_index": q_idx,
+                DEFAULT_ITEM_COL: query_asset_id,
+                DEFAULT_TIMESTAMP_COL: query_rec_time,
                 "cf_index": cf_idx,
                 "factual_prediction": factual_pred,
                 "cf_prediction": float(cf_pred),
@@ -635,12 +519,16 @@ def main():
 
             factual_window_row = {
                 "query_index": q_idx,
+                DEFAULT_ITEM_COL: query_asset_id,
+                DEFAULT_TIMESTAMP_COL: query_rec_time,
                 "cf_index": cf_idx,
                 "row_type": "factual",
                 "window_line": json.dumps(factual_window_map),
             }
             counterfactual_window_row = {
                 "query_index": q_idx,
+                DEFAULT_ITEM_COL: query_asset_id,
+                DEFAULT_TIMESTAMP_COL: query_rec_time,
                 "cf_index": cf_idx,
                 "row_type": "counterfactual",
                 "window_line": json.dumps(cf_window_map),
