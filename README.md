@@ -59,8 +59,10 @@ Three models are accepted: rfr, mlp and tabnet.
 
 Specify the parameters or defaults will be used.
 
+For rfr, can be used _internal_ or _external_ kpis generation. _internal_ follows the same approach as mlp/tabnet
+
 ```
-python3 run_recommendation.py FAR-Trans-Data results rfr 100
+python3 run_recommendation.py FAR-Trans-Data results rfr 100 internal
 ```
 
 ```
@@ -79,4 +81,9 @@ python3 recommendation.py Far-Trans-Data prices range 2019-08-01 2021-02-26 28 1
 **Compute the average metrics**
 ```
 python3 process_results.py
+```
+
+**Generate the counterfactuals**
+```
+python3 generate_rfr_counterfactuals_pkl.py
 ```
