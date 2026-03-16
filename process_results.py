@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 
 RESULTS_ROOT = "results"
 STATS_DIR = "stats"
-SUMMARY_COLUMNS = ["mean", "median", "std", "min", "max"]
 
 # These experiment ranges are defined in run_recommendation.py -> dates = [...]
 # We classify windows by split date (the date in each metrics filename).
@@ -102,65 +101,6 @@ def compute_full_stats_per_metric(all_metrics):
 def _sanitize_filename(value):
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("_")
 
-
-def _run_label(model_name, run_prefix):
-    prefix = f"{model_name}_"
-    if run_prefix.startswith(prefix):
-        return run_prefix[len(prefix):]
-    return run_prefix
-
-
-def save_model_comparison_plots(model_name, run_stats_tables):
-    if not run_stats_tables:
-        return
-
-    plot_root = os.path.join(STATS_DIR, "plots", model_name)
-    metrics = sorted(
-        {
-            metric
-            for _, stats_df in run_stats_tables
-            for metric in stats_df["metric"].astype(str).tolist()
-        }
-    )
-
-    for metric_name in metrics:
-        rows = []
-        for run_prefix, stats_df in run_stats_tables:
-            row = stats_df[stats_df["metric"] == metric_name]
-            if row.empty:
-                continue
-            row = row.iloc[0]
-            rows.append(
-                {
-                    "label": _run_label(model_name, run_prefix),
-                    "mean": float(row["mean"]),
-                    "median": float(row["median"]),
-                    "std": float(row["std"]),
-                    "min": float(row["min"]),
-                    "max": float(row["max"]),
-                }
-            )
-
-        if not rows:
-            continue
-
-        metric_df = pd.DataFrame(rows).sort_values("label")
-
-        for summary_col in SUMMARY_COLUMNS:
-            out_dir = os.path.join(plot_root, summary_col)
-            os.makedirs(out_dir, exist_ok=True)
-            out_file = os.path.join(out_dir, f"{_sanitize_filename(metric_name)}.png")
-
-            fig, ax = plt.subplots(figsize=(10, 4))
-            ax.bar(metric_df["label"], metric_df[summary_col])
-            ax.set_title(f"{model_name} | {metric_name} | {summary_col}")
-            ax.set_xlabel("Model parameters")
-            ax.set_ylabel(summary_col)
-            ax.tick_params(axis="x", rotation=45, labelsize=8)
-            ax.grid(axis="y", linestyle="--", alpha=0.3)
-            fig.tight_layout()
-            fig.savefig(out_file, dpi=160)
-            plt.close(fig)
 
 
 def save_all_models_plots(all_run_stats_tables):
