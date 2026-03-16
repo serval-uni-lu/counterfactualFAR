@@ -66,11 +66,11 @@ python3 run_recommendation.py FAR-Trans-Data results rfr 100 internal
 ```
 
 ```
-python3 run_recommendation.py FAR-Trans-Data results mlp 64 32 8 4
+python3 run_recommendation.py FAR-Trans-Data results mlp 64 32 16
 ```
 
 ```
-python3 run_recommendation.py FAR-Trans-Data results tabnet 32 32 7
+python3 run_recommendation.py FAR-Trans-Data results tabnet 32 32 3
 ```
 
 Run specific time recommendation
@@ -84,6 +84,15 @@ python3 process_results.py
 ```
 
 **Generate the counterfactuals**
+
+By default, runs the last window of each experiment (exp1: 2020-08-28, exp2: 2021-11-23).
+Training/testing CSVs and output paths are auto-derived from the pkl filename.
 ```
 python3 generate_rfr_counterfactuals_pkl.py
+```
+
+Run a single window:
+```
+python3 generate_rfr_counterfactuals_pkl.py \
+  --model-pkl artifacts_for_counterfactuals/rfr_n-100_kpi-full_short_internal_kpis/profitability_recommendation_pipeline_2021-11-23_00-00-00_rfr_n-100_kpi-full_short_internal_kpis.pkl
 ```
