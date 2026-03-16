@@ -92,17 +92,19 @@ class ProfitabilityPrediction(Algorithm):
         n_estimators = getattr(self.model, "n_estimators", "na")
         return self._safe_fragment(f"n-{n_estimators}")
 
+    def _artifact_dir(self):
+        return os.path.join("artifacts_for_counterfactuals", f"{self._model_tag()}_{self._model_param_tag()}")
+
     def _dataset_artifact_label(self, when):
         return self._safe_fragment(when)
 
     def _artifact_path(self, prefix, when, extension="csv"):
-        return f"for_testing/{prefix}_{self._safe_fragment(when)}_{self._model_tag()}_{self._model_param_tag()}.{extension}"
+        name = f"{prefix}_{self._safe_fragment(when)}_{self._model_tag()}_{self._model_param_tag()}.{extension}"
+        return os.path.join(self._artifact_dir(), name)
 
     def _dataset_artifact_path(self, prefix, when, extension="csv"):
-        dataset_tag = self._model_tag()
-        if isinstance(self.model, RFRKPIModel):
-            dataset_tag = "rfr_internal_kpis"
-        return f"for_testing/{prefix}_{self._safe_fragment(when)}_{dataset_tag}.{extension}"
+        name = f"{prefix}_{self._safe_fragment(when)}_{self._model_tag()}_{self._model_param_tag()}.{extension}"
+        return os.path.join(self._artifact_dir(), name)
 
     def _save_csv_if_missing(self, df, path):
         if not os.path.exists(path):
@@ -244,40 +246,45 @@ class ProfitabilityPrediction(Algorithm):
                 training_time_series = time_series_df[time_series_df[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]  # Internal-model train split over raw time-series (same temporal cutoff as KPI train rows)
                 train_targets = training_data[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]]
                 device = "cuda" if torch.cuda.is_available() else "cpu"
+                artifact_prefix = os.path.join(
+                    self._artifact_dir(),
+                    f"kpis_train_{self._dataset_artifact_label(train_date)}_{self._model_tag()}_{self._model_param_tag()}",
+                ) if self.save_for_testing else None
+
                 if isinstance(self.model, TabNetKPIModel):
                     self.model.fit(
                         training_time_series,
                         train_targets,
                         kpi_features=self.indicators,
-                        epochs=150,
-                        batch_size=2048,
+                        epochs=200,
+                        batch_size=1024,
                         learning_rate=3e-3,
-                        weight_decay=1e-5,
+                        weight_decay=1e-4,
                         val_split=0.1,
-                        patience=20,
+                        patience=25,
                         device=device,
-                        artifact_label=self._dataset_artifact_label(train_date) if self.save_for_testing else None,
+                        artifact_label=artifact_prefix,
                     )
                 elif isinstance(self.model, RFRKPIModel):
                     self.model.fit(
                         training_time_series,
                         train_targets,
                         kpi_features=self.indicators,
-                        artifact_label=self._dataset_artifact_label(train_date) if self.save_for_testing else None,
+                        artifact_label=artifact_prefix,
                     )
                 else:
                     self.model.fit(
                         training_time_series,
                         train_targets,
                         kpi_features=self.indicators,
-                        epochs=150,
+                        epochs=200,
                         batch_size=2048,
                         learning_rate=1e-3,
-                        weight_decay=1e-4,
+                        weight_decay=1e-3,
                         val_split=0.1,
-                        patience=15,
+                        patience=30,
                         device=device,
-                        artifact_label=self._dataset_artifact_label(train_date) if self.save_for_testing else None,
+                        artifact_label=artifact_prefix,
                     )
             else:
                 # External (precomputed-KPI) models are trained directly on KPI features.
@@ -285,11 +292,20 @@ class ProfitabilityPrediction(Algorithm):
             
             self.is_fitted = True
             if self.save_for_testing:
-                os.makedirs("for_testing", exist_ok=True)
-            
-                # Save to CSV using the same split-derived KPI datasets for both internal and external flows.
-                self._save_csv_if_missing(training_data, self._dataset_artifact_path("training_data", train_date))
-                self._save_csv_if_missing(kpi_indicators_test, self._dataset_artifact_path("testing_data", train_date))
+                os.makedirs(self._artifact_dir(), exist_ok=True)
+
+                if isinstance(self.model, RFRKPIModel):
+                    # Save raw time-series splits so CF generation scripts can build
+                    # windows and regenerate KPIs through the pipeline.
+                    testing_time_series = time_series_df[
+                        time_series_df[DEFAULT_TIMESTAMP_COL] >= (train_date - delta)
+                    ]
+                    self._save_csv_if_missing(training_time_series, self._dataset_artifact_path("training_data", train_date))
+                    self._save_csv_if_missing(testing_time_series, self._dataset_artifact_path("testing_data", train_date))
+                else:
+                    # Save KPI-based splits for all other models.
+                    self._save_csv_if_missing(training_data, self._dataset_artifact_path("training_data", train_date))
+                    self._save_csv_if_missing(kpi_indicators_test, self._dataset_artifact_path("testing_data", train_date))
                 self.save_fitted_model(train_date)
 
 
