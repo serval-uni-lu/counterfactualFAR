@@ -159,7 +159,7 @@ class MLPKPIModel(nn.Module):
         # Generate KPIs from the full time series via module
         kpis_df = self.kpi_module.generate_kpis_df(time_series_df)
         if artifact_label is not None:
-            os.makedirs("for_testing", exist_ok=True)
+            os.makedirs(os.path.dirname(artifact_label), exist_ok=True)
             if isinstance(y, pd.DataFrame):
                 target_cols = [DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]
                 if all(col in y.columns for col in target_cols):
@@ -172,7 +172,7 @@ class MLPKPIModel(nn.Module):
                     kpis_to_save = kpis_df
             else:
                 kpis_to_save = kpis_df
-            kpis_to_save.to_csv(f"for_testing/generated_kpis_train_{artifact_label}_mlp.csv", index=False)
+            kpis_to_save.to_csv(f"{artifact_label}.csv", index=False)
 
         if isinstance(y, pd.DataFrame):
             required_target_cols = [DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]

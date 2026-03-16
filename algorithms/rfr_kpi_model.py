@@ -77,23 +77,38 @@ class RFRKPIModel:
 
     def __init__(
         self,
-        n_estimators=20,
+        n_estimators=100,
         k=5,
         kpi_type="full_short",
         kpi_features=None,
         random_state=42,
+        max_features="sqrt",
+        min_samples_leaf=10,
+        max_depth=20,
+        n_jobs=-1,
     ):
         self.n_estimators = int(n_estimators)
         self.k = k
         self.kpi_type = kpi_type
         self.kpi_features = kpi_features
         self.random_state = random_state
+        self.max_features = max_features
+        self.min_samples_leaf = int(min_samples_leaf)
+        self.max_depth = max_depth
+        self.n_jobs = n_jobs
 
         self.transformer = KPIFeatureTransformer(k=k, kpi_type=kpi_type, kpi_features=kpi_features)
         self.pipeline = Pipeline(
             steps=[
                 ("kpi", self.transformer),
-                ("rf", RandomForestRegressor(n_estimators=self.n_estimators, random_state=self.random_state)),
+                ("rf", RandomForestRegressor(
+                    n_estimators=self.n_estimators,
+                    max_features=self.max_features,
+                    min_samples_leaf=self.min_samples_leaf,
+                    max_depth=self.max_depth,
+                    n_jobs=self.n_jobs,
+                    random_state=self.random_state,
+                )),
             ]
         )
         self.model = self.pipeline.named_steps["rf"]
@@ -115,7 +130,7 @@ class RFRKPIModel:
 
         kpis_df = self._generate_kpis_df(time_series_df)
         if artifact_label is not None:
-            os.makedirs("for_testing", exist_ok=True)
+            os.makedirs(os.path.dirname(artifact_label), exist_ok=True)
             if isinstance(y, pd.DataFrame):
                 target_cols = [DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]
                 if all(col in y.columns for col in target_cols):
@@ -128,7 +143,7 @@ class RFRKPIModel:
                     kpis_to_save = kpis_df
             else:
                 kpis_to_save = kpis_df
-            kpis_to_save.to_csv(f"for_testing/generated_kpis_train_{artifact_label}_rfr.csv", index=False)
+            kpis_to_save.to_csv(f"{artifact_label}.csv", index=False)
 
         if isinstance(y, pd.DataFrame):
             required_target_cols = [DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]
