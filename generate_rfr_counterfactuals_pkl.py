@@ -7,6 +7,7 @@ through the saved internal RFR pipeline by regenerating KPIs from the synthetic 
 import argparse
 import json
 import pickle
+import re
 import time
 import os
 from pathlib import Path
@@ -17,21 +18,25 @@ import dice_ml
 import numpy as np
 import pandas as pd
 from dice_ml import Dice
+from raiutils.exceptions import UserConfigValidationException
 
 from utils.constants import DEFAULT_ITEM_COL, DEFAULT_RATING_COL, DEFAULT_TIMESTAMP_COL
 
 
-DEFAULT_MODEL_PKL = Path(
-    "for_testing/profitability_recommendation_pipeline_2020-08-28_00-00-00_rfr_n-40_kpi-full_short_internal_kpis.pkl"
-)
-DEFAULT_TRAINING = Path("for_testing/training_data_2020-08-28_00-00-00_rfr_internal_kpis.csv")
-DEFAULT_TESTING = Path("for_testing/testing_data_2020-08-28_00-00-00_rfr_internal_kpis.csv")
-DEFAULT_CF_OUT = Path("results/counterfactuals/rfr_pkl_ts_counterfactuals.csv")
-DEFAULT_SUMMARY_OUT = Path("results/counterfactuals/rfr_pkl_ts_counterfactuals_summary.csv")
+_ARTIFACTS_DIR = Path("artifacts_for_counterfactuals")
+_MODEL_TAG = "rfr_n-100_kpi-full_short_internal_kpis"
+
+# Last window of each experiment:
+#   exp1: 2019-08-01 → 2020-08-28
+#   exp2: 2020-09-14 → 2021-11-23
+DEFAULT_EXPERIMENT_PKLS = [
+    _ARTIFACTS_DIR / _MODEL_TAG / f"profitability_recommendation_pipeline_2020-08-28_00-00-00_{_MODEL_TAG}.pkl",
+    _ARTIFACTS_DIR / _MODEL_TAG / f"profitability_recommendation_pipeline_2021-11-23_00-00-00_{_MODEL_TAG}.pkl",
+]
 FIXED_WINDOW_SIZE = 21
-DEFAULT_MAX_REFERENCE_WINDOWS = 30
-DEFAULT_DICE_METHOD = "random"
-PREDICT_PROGRESS_EVERY = 25
+DEFAULT_MAX_REFERENCE_WINDOWS = 100
+DEFAULT_DICE_METHOD = "genetic"
+DEFAULT_MAXITERATIONS = 50
 MIN_POSITIVE_UPLIFT = 1e-6
 
 
@@ -153,6 +158,7 @@ class RFRPKLWindowWrapper:
         self._context_timestamp = None
         self._context_panel = None
         self._context_series = None
+        self._kpi_fallback_warned = False
 
     def _get_thread_model(self):
         if not hasattr(self._thread_local, "model"):
@@ -182,6 +188,7 @@ class RFRPKLWindowWrapper:
         self._context_timestamp = ts
         self._context_panel = panel_df
         self._context_series = asset_series
+        self._kpi_fallback_warned = False  # reset per-query warning flag
 
     def _predict_from_ts_context(self, ts_df: pd.DataFrame, context_item, context_timestamp, model_obj=None) -> float:
         """Score one contextual raw time-series frame via the exact internal RFR path."""
@@ -208,7 +215,16 @@ class RFRPKLWindowWrapper:
                 & (kpis_df[DEFAULT_TIMESTAMP_COL] == context_timestamp)
             ]
             if selected.empty:
-                selected = kpis_df[kpis_df[DEFAULT_ITEM_COL] == context_item].tail(1)
+                fallback = kpis_df[kpis_df[DEFAULT_ITEM_COL] == context_item].tail(1)
+                if not fallback.empty and not self._kpi_fallback_warned:
+                    fallback_ts = fallback.iloc[0][DEFAULT_TIMESTAMP_COL]
+                    print(
+                        f"WARNING: KPI row for ({context_item}, {context_timestamp}) not found. "
+                        f"Scoring via most recent KPI row at {fallback_ts} for all candidates in this query.",
+                        flush=True,
+                    )
+                    self._kpi_fallback_warned = True
+                selected = fallback
         else:
             selected = kpis_df[kpis_df[DEFAULT_ITEM_COL] == context_item].tail(1)
 
@@ -246,9 +262,12 @@ class RFRPKLWindowWrapper:
         def _score_one(task) -> float:
             idx, row_values = task
             total = arr.shape[0]
-            if total <= 10 or (idx + 1) % PREDICT_PROGRESS_EVERY == 0 or idx == 0 or (idx + 1) == total:
-                print(f"Processing candidate window {idx + 1}/{total}", flush=True)
             context_item = self._context_item
+            print(
+                f"Processing candidate window {idx + 1}/{total} "
+                f"(candidate_index={idx + 1}, asset={context_item})",
+                flush=True,
+            )
             context_timestamp = self._context_timestamp
 
             if self._context_panel is None or self._context_item is None or self._context_timestamp is None:
@@ -257,9 +276,10 @@ class RFRPKLWindowWrapper:
                     "synthetic fallback windows are disabled."
                 )
 
-            ts_df = self._context_panel.copy()
-            item_mask = ts_df[DEFAULT_ITEM_COL] == context_item
-            item_indices = ts_df.index[item_mask].to_numpy()
+            # Filter to query asset only: KPI generation is per-asset independent,
+            # so passing all assets is equivalent but O(N_assets) times slower.
+            ts_df = self._context_panel[self._context_panel[DEFAULT_ITEM_COL] == context_item].copy()
+            item_indices = ts_df.index.to_numpy()
             if len(item_indices) < self.window_size:
                 raise ValueError(
                     f"Insufficient context rows for CF window replacement on asset={context_item}: "
@@ -286,6 +306,67 @@ class RFRPKLWindowWrapper:
         return np.asarray(preds, dtype=np.float64)
 
 
+def _cf_utility_metrics(
+    factual_win: np.ndarray,
+    cf_win: np.ndarray,
+    factual_pred: float,
+    cf_pred: float,
+    desired_min: float,
+    desired_max: float,
+) -> dict:
+    """Compute standard counterfactual utility metrics for one (factual, CF) pair.
+
+    Metrics
+    -------
+    validity        : 1 if cf_pred is within [desired_min, desired_max], else 0.
+    lift            : cf_pred - factual_pred  (signed improvement in profitability score).
+    l1_dist         : sum of absolute price changes across the window (total movement).
+    l2_dist         : Euclidean distance between factual and CF price windows.
+    mean_abs_delta  : l1_dist / window_size  (average per-step absolute price change).
+    mean_rel_delta  : mean of |delta_i / factual_i| where factual_i != 0
+                      (average relative price change; scale-free).
+    n_changed       : number of window steps where the price actually changed (> 1e-8).
+    sparsity        : n_changed / window_size  (0 = identical, 1 = all steps changed).
+    max_abs_delta   : largest absolute price change at any single window step.
+    max_rel_delta   : largest relative price change at any single window step.
+    """
+    delta = cf_win - factual_win
+    abs_delta = np.abs(delta)
+    changed_mask = abs_delta > 1e-8
+    n = len(factual_win)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rel_delta = np.where(np.abs(factual_win) > 1e-8, abs_delta / np.abs(factual_win), 0.0)
+
+    return {
+        "validity": int(desired_min <= cf_pred <= desired_max),
+        "lift": round(float(cf_pred - factual_pred), 8),
+        "l1_dist": round(float(abs_delta.sum()), 8),
+        "l2_dist": round(float(np.sqrt((delta ** 2).sum())), 8),
+        "mean_abs_delta": round(float(abs_delta.mean()), 8),
+        "mean_rel_delta": round(float(rel_delta.mean()), 8),
+        "n_changed": int(changed_mask.sum()),
+        "sparsity": round(float(changed_mask.sum() / n), 6),
+        "max_abs_delta": round(float(abs_delta.max()), 8),
+        "max_rel_delta": round(float(rel_delta.max()), 8),
+    }
+
+
+def _window_to_timeseries(
+    prices: np.ndarray,
+    timestamps,
+    item_id,
+    query_index: int,
+) -> pd.DataFrame:
+    """Return one row: the CF price at the query timestamp (last step of the window)."""
+    return pd.DataFrame([{
+        "query_index": query_index,
+        DEFAULT_ITEM_COL: item_id,
+        DEFAULT_TIMESTAMP_COL: timestamps[-1],
+        DEFAULT_RATING_COL: float(prices[-1]),
+    }])
+
+
 def _build_kpi_predictions(model, series_df: pd.DataFrame, recommend_date: pd.Timestamp) -> pd.DataFrame:
     """Generate KPI rows and model predictions from all rows up to recommend_date."""
 
@@ -308,49 +389,54 @@ def _build_kpi_predictions(model, series_df: pd.DataFrame, recommend_date: pd.Ti
     return scored
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Generate RFR counterfactuals at a recommendation date (no target required)"
-    )
-    parser.add_argument("--model-pkl", type=Path, default=DEFAULT_MODEL_PKL)
-    parser.add_argument("--training", type=Path, default=DEFAULT_TRAINING)
-    parser.add_argument("--testing", type=Path, default=DEFAULT_TESTING)
-    parser.add_argument("--asset-id", type=str, default=None, help="Optional single asset to process")
-    parser.add_argument("--window-size", type=int, default=None)
-    parser.add_argument("--n-jobs", type=int, default=1)
-    parser.add_argument("--method", type=str, default=DEFAULT_DICE_METHOD, choices=["genetic", "random", "kdtree"])
-    parser.add_argument("--maxiterations", type=int, default=3)
-    parser.add_argument("--total-cfs", type=int, default=1)
-    parser.add_argument(
-        "--max-reference-windows",
-        type=int,
-        default=DEFAULT_MAX_REFERENCE_WINDOWS,
-        help="Maximum number of reference windows used by DiCE per query (<=0 disables cap)",
-    )
-    parser.add_argument(
-        "--desired-max",
-        type=float,
-        default=None,
-        help="Optional global upper bound for desired prediction range",
-    )
-    parser.add_argument("--out-cf", type=Path, default=DEFAULT_CF_OUT)
-    parser.add_argument("--out-summary", type=Path, default=DEFAULT_SUMMARY_OUT)
-    args = parser.parse_args()
+def _derive_data_paths(pkl_path: Path) -> tuple[Path, Path]:
+    """Derive training and testing CSV paths from the pkl path using the naming convention.
 
-    model = _load_model(args.model_pkl)
+    Convention: profitability_recommendation_pipeline_{date}_{model}.pkl
+             →  training_data_{date}_{model}.csv / testing_data_{date}_{model}.csv
+    """
+    suffix = pkl_path.stem.replace("profitability_recommendation_pipeline_", "")
+    parent = pkl_path.parent
+    return (
+        parent / f"training_data_{suffix}.csv",
+        parent / f"testing_data_{suffix}.csv",
+    )
 
-    training_ts = pd.read_csv(args.training)
+
+def _derive_output_paths(pkl_path: Path) -> tuple[Path, Path, Path]:
+    """Derive the three output CSV paths from the pkl path."""
+    pkl_name = pkl_path.stem
+    model_dir = pkl_path.parent.name
+    date_match = re.search(r"(\d{4}-\d{2}-\d{2})", pkl_name)
+    date_tag = date_match.group(1) if date_match else "unknown_date"
+    out_dir = Path("counterfactuals") / model_dir
+    tag = f"{model_dir}_{date_tag}"
+    return (
+        out_dir / f"cf_details_{tag}.csv",
+        out_dir / f"summary_{tag}.csv",
+        out_dir / f"cf_timeseries_{tag}.csv",
+    )
+
+
+def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
+                 out_cf: Path, out_summary: Path, out_timeseries: Path, args) -> None:
+    """Run CF generation for one pkl / window."""
+
+    print(f"\n{'='*70}", flush=True)
+    print(f"PKL: {pkl_path}", flush=True)
+    print(f"{'='*70}", flush=True)
+
+    model = _load_model(pkl_path)
+
+    training_ts = pd.read_csv(training_path)
     _validate_ts(training_ts, "training")
     training_ts[DEFAULT_TIMESTAMP_COL] = pd.to_datetime(training_ts[DEFAULT_TIMESTAMP_COL])
     training_ts = training_ts.sort_values([DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]).reset_index(drop=True)
 
-    testing_ts = pd.read_csv(args.testing)
+    testing_ts = pd.read_csv(testing_path)
     _validate_ts(testing_ts, "testing")
     testing_ts[DEFAULT_TIMESTAMP_COL] = pd.to_datetime(testing_ts[DEFAULT_TIMESTAMP_COL])
     testing_ts = testing_ts.sort_values([DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]).reset_index(drop=True)
-
-    if args.window_size is not None and int(args.window_size) != FIXED_WINDOW_SIZE:
-        raise ValueError(f"This script is fixed to window-size={FIXED_WINDOW_SIZE}")
 
     window_size = FIXED_WINDOW_SIZE
     window_cols = [f"w_{i}" for i in range(window_size)]
@@ -364,33 +450,45 @@ def main():
 
     query_rows = testing_ts.copy()
     if query_rows.empty:
-        raise ValueError("No rows in --testing; cannot build factual windows")
+        raise ValueError("No rows in testing CSV; cannot build factual windows")
 
     if args.asset_id is not None:
         query_rows = query_rows[query_rows[DEFAULT_ITEM_COL] == args.asset_id].copy()
         if query_rows.empty:
-            raise ValueError(f"No query rows found for asset-id={args.asset_id} in --testing")
+            raise ValueError(f"No query rows found for asset-id={args.asset_id} in testing CSV")
 
     query_windows = build_window_dataset(full_history, window_size, query_df=query_rows)
     if query_windows.empty:
-        raise ValueError("No valid query windows in --testing")
+        raise ValueError("No valid query windows in testing CSV")
 
     n_jobs = os.cpu_count() if int(args.n_jobs) == -1 else int(args.n_jobs)
     wrapper = RFRPKLWindowWrapper(model, window_cols, full_time_series=full_history, n_jobs=max(1, n_jobs))
     dice_model = dice_ml.Model(model=wrapper, backend="sklearn", model_type="regressor")
 
-    args.out_cf.parent.mkdir(parents=True, exist_ok=True)
-    args.out_summary.parent.mkdir(parents=True, exist_ok=True)
+    out_cf.parent.mkdir(parents=True, exist_ok=True)
 
     prediction_columns = [
         "query_index",
         DEFAULT_ITEM_COL,
         DEFAULT_TIMESTAMP_COL,
         "cf_index",
+        "factual_rating",     # last price in the factual window (at query timestamp)
+        "cf_rating",          # last price in the CF window (at query timestamp)
         "factual_prediction",
         "cf_prediction",
         "desired_min",
         "desired_max",
+        # Utility metrics
+        "validity",       # 1 if cf_pred in [desired_min, desired_max]
+        "lift",           # cf_pred - factual_pred
+        "l1_dist",        # total absolute price movement across the window
+        "l2_dist",        # Euclidean distance between factual and CF windows
+        "mean_abs_delta", # l1_dist / window_size
+        "mean_rel_delta", # mean relative price change (scale-free)
+        "n_changed",      # number of window steps that changed
+        "sparsity",       # n_changed / window_size (0=identical, 1=all changed)
+        "max_abs_delta",  # largest price change at any single step
+        "max_rel_delta",  # largest relative change at any single step
     ]
     window_columns = [
         "query_index",
@@ -400,11 +498,18 @@ def main():
         "row_type",
         "window_line",
     ]
+    timeseries_columns = [
+        "query_index",
+        DEFAULT_ITEM_COL,
+        DEFAULT_TIMESTAMP_COL,
+        DEFAULT_RATING_COL,
+    ]
 
-    pd.DataFrame(columns=prediction_columns).to_csv(args.out_cf, index=False)
-    pd.DataFrame(columns=window_columns).to_csv(args.out_summary, index=False)
+    pd.DataFrame(columns=prediction_columns).to_csv(out_cf, index=False)
+    pd.DataFrame(columns=window_columns).to_csv(out_summary, index=False)
+    pd.DataFrame(columns=timeseries_columns).to_csv(out_timeseries, index=False)
 
-    print(f"Found {len(query_windows)} query windows from --testing")
+    print(f"Found {len(query_windows)} query windows from testing CSV")
 
     for _, query_row in query_windows.iterrows():
         query_row = query_row.to_frame().T.copy()
@@ -420,6 +525,7 @@ def main():
         )
 
         wrapper.set_query_context(query_asset_id, query_rec_time)
+        window_timestamps = wrapper._context_series.tail(window_size)[DEFAULT_TIMESTAMP_COL].values
 
         history_up_to_query = full_history[full_history[DEFAULT_TIMESTAMP_COL] <= query_rec_time].copy()
         validate_no_future_data(history_up_to_query, query_rec_time, "history_up_to_query")
@@ -446,6 +552,12 @@ def main():
             continue
 
         factual_pred = float(wrapper.predict(query_x)[0])
+        # TODO: set desired_min = top-k recommendation threshold at query_rec_time instead of
+        # factual_pred + ε. The meaningful CF for the recommendation goal is "what price pattern
+        # would push this asset into the top-k ranked assets", not just "any improvement".
+        # Load predictions_{date}_{model}.csv, compute predictions.nlargest(top_k).iloc[-1],
+        # and use that as desired_min so DiCE searches for windows that would make this asset
+        # actually recommendable.
         desired_min = factual_pred + MIN_POSITIVE_UPLIFT
 
         if args.desired_max is None:
@@ -465,6 +577,11 @@ def main():
             & (reference_windows[DEFAULT_TIMESTAMP_COL] < query_rec_time)
         ].copy()
         if dice_train_query.empty:
+            print(
+                f"WARNING: No historical windows for asset={query_asset_id} before {query_rec_time}. "
+                "Falling back to all-asset reference windows. CFs may reflect another asset's price scale.",
+                flush=True,
+            )
             dice_train_query = reference_windows[
                 reference_windows[DEFAULT_TIMESTAMP_COL] < query_rec_time
             ].copy()
@@ -492,29 +609,64 @@ def main():
             cf_kwargs["maxiterations"] = int(args.maxiterations)
 
         t0 = time.time()
-        dice_exp = exp_query.generate_counterfactuals(query_x, **cf_kwargs)
+        try:
+            dice_exp = exp_query.generate_counterfactuals(query_x, **cf_kwargs)
+        except UserConfigValidationException as error:
+            msg = str(error)
+            if "No counterfactuals found" in msg:
+                elapsed = time.time() - t0
+                print(
+                    f"No counterfactuals found for query-index {q_idx} | "
+                    f"asset={query_asset_id} | timestamp={query_rec_time} | elapsed={elapsed:.1f}s",
+                    flush=True,
+                )
+                continue
+            raise
         elapsed = time.time() - t0
-        print(f"Finished CF search for query-index {q_idx} in {elapsed:.1f}s")
-        final_cfs = dice_exp.cf_examples_list[0].final_cfs_df.copy()
+        final_cfs = dice_exp.cf_examples_list[0].final_cfs_df
         if final_cfs is None or final_cfs.empty:
+            print(
+                f"No valid CFs returned for query-index {q_idx} | "
+                f"asset={query_asset_id} | timestamp={query_rec_time} | elapsed={elapsed:.1f}s",
+                flush=True,
+            )
             continue
+        final_cfs = final_cfs.copy()
+        print(
+            f"Found {len(final_cfs)} CF(s) for query-index {q_idx} | "
+            f"asset={query_asset_id} | timestamp={query_rec_time} | elapsed={elapsed:.1f}s",
+            flush=True,
+        )
 
         for cf_idx, (_, cf_row) in enumerate(final_cfs.iterrows()):
-            cf_x = pd.DataFrame([cf_row[window_cols].to_dict()])
-            cf_pred = float(wrapper.predict(cf_x)[0])
+            # DiCE already evaluated each CF via the wrapper; reuse the stored prediction
+            # rather than re-running the full KPI pipeline for every CF.
+            # Fall back to re-prediction if DiCE didn't store the outcome column.
+            if "prediction" in cf_row.index:
+                cf_pred = float(cf_row["prediction"])
+            else:
+                cf_x = pd.DataFrame([cf_row[window_cols].to_dict()])
+                cf_pred = float(wrapper.predict(cf_x)[0])
 
-            factual_window_map = {col: float(query_row.iloc[0][col]) for col in window_cols}
-            cf_window_map = {col: float(cf_row[col]) for col in window_cols}
+            factual_win = np.array([float(query_row.iloc[0][col]) for col in window_cols])
+            cf_win = np.array([float(cf_row[col]) for col in window_cols])
+            factual_window_map = dict(zip(window_cols, factual_win.tolist()))
+            cf_window_map = dict(zip(window_cols, cf_win.tolist()))
+
+            metrics = _cf_utility_metrics(factual_win, cf_win, factual_pred, cf_pred, desired_min, desired_max)
 
             prediction_row = {
                 "query_index": q_idx,
                 DEFAULT_ITEM_COL: query_asset_id,
                 DEFAULT_TIMESTAMP_COL: query_rec_time,
                 "cf_index": cf_idx,
+                "factual_rating": float(factual_win[-1]),
+                "cf_rating": float(cf_win[-1]),
                 "factual_prediction": factual_pred,
                 "cf_prediction": float(cf_pred),
                 "desired_min": desired_min,
                 "desired_max": desired_max,
+                **metrics,
             }
 
             factual_window_row = {
@@ -534,21 +686,66 @@ def main():
                 "window_line": json.dumps(cf_window_map),
             }
 
+            cf_ts_df = _window_to_timeseries(cf_win, window_timestamps, query_asset_id, q_idx)
+
             pd.DataFrame([prediction_row], columns=prediction_columns).to_csv(
-                args.out_cf,
-                mode="a",
-                header=False,
-                index=False,
+                out_cf, mode="a", header=False, index=False,
             )
             pd.DataFrame([factual_window_row, counterfactual_window_row], columns=window_columns).to_csv(
-                args.out_summary,
-                mode="a",
-                header=False,
-                index=False,
+                out_summary, mode="a", header=False, index=False,
+            )
+            cf_ts_df[timeseries_columns].to_csv(
+                out_timeseries, mode="a", header=False, index=False,
             )
 
-    print(f"Saved counterfactuals: {args.out_cf}")
-    print(f"Saved summary: {args.out_summary}")
+    print(f"Saved counterfactuals : {out_cf}")
+    print(f"Saved summary         : {out_summary}")
+    print(f"Saved timeseries      : {out_timeseries}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate RFR counterfactuals for the last window of each experiment (or custom pkls)"
+    )
+    parser.add_argument(
+        "--model-pkl",
+        type=Path,
+        nargs="+",
+        default=DEFAULT_EXPERIMENT_PKLS,
+        metavar="PKL",
+        help=(
+            "One or more pkl paths to process. Training/testing CSVs are auto-derived "
+            "from the pkl filename. Defaults to the last window of each experiment "
+            "(2020-08-28 for exp1, 2021-11-23 for exp2)."
+        ),
+    )
+    parser.add_argument("--asset-id", type=str, default=None, help="Optional single asset to process")
+    parser.add_argument("--window-size", type=int, default=None)
+    parser.add_argument("--n-jobs", type=int, default=1)
+    parser.add_argument("--method", type=str, default=DEFAULT_DICE_METHOD, choices=["genetic", "random", "kdtree"])
+    parser.add_argument("--maxiterations", type=int, default=DEFAULT_MAXITERATIONS)
+    parser.add_argument("--total-cfs", type=int, default=1)
+    parser.add_argument(
+        "--max-reference-windows",
+        type=int,
+        default=DEFAULT_MAX_REFERENCE_WINDOWS,
+        help="Maximum number of reference windows used by DiCE per query (<=0 disables cap)",
+    )
+    parser.add_argument(
+        "--desired-max",
+        type=float,
+        default=None,
+        help="Optional global upper bound for desired prediction range",
+    )
+    args = parser.parse_args()
+
+    if args.window_size is not None and int(args.window_size) != FIXED_WINDOW_SIZE:
+        raise ValueError(f"This script is fixed to window-size={FIXED_WINDOW_SIZE}")
+
+    for pkl_path in args.model_pkl:
+        training_path, testing_path = _derive_data_paths(pkl_path)
+        out_cf, out_summary, out_timeseries = _derive_output_paths(pkl_path)
+        _run_for_pkl(pkl_path, training_path, testing_path, out_cf, out_summary, out_timeseries, args)
 
 
 if __name__ == "__main__":
