@@ -91,7 +91,7 @@ TABNET_ALLOWED_KEYS = {"kpi", "kpi_type", "n_d", "n_a", "n_steps"}
 
 
 def _parse_rfr_params(params):
-    n = 20
+    n = 100
     kpi_type = "full_short"
     use_internal = True
 
@@ -157,9 +157,9 @@ def _parse_mlp_params(params):
 def _parse_tabnet_params(params):
     config = {
         "kpi_type": "full_short",
-        "n_d": 16,
-        "n_a": 16,
-        "n_steps": 4,
+        "n_d": 32,
+        "n_a": 32,
+        "n_steps": 3,
     }
 
     if not params:
@@ -323,9 +323,20 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
                 kpi_type=kpi_type,
                 kpi_features=feats,
                 random_state=42,
+                max_features="sqrt",
+                min_samples_leaf=10,
+                max_depth=20,
+                n_jobs=-1,
             )
         else:
-            alg_model = RandomForestRegressor(n_estimators=n, random_state=42)
+            alg_model = RandomForestRegressor(
+                n_estimators=n,
+                max_features="sqrt",
+                min_samples_leaf=10,
+                max_depth=20,
+                n_jobs=-1,
+                random_state=42,
+            )
     elif model_id == MLP:
         # Create MLP model (KPI generation happens inside the model)
         alg_model = MLPKPIModel(
@@ -345,6 +356,8 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
             n_d=tabnet_cfg["n_d"],
             n_a=tabnet_cfg["n_a"],
             n_steps=tabnet_cfg["n_steps"],
+            gamma=1.3,
+            lambda_sparse=1e-4,
         )
 
     training_sizes_path = os.path.join(os.path.dirname(output_dir), "training_sizes.csv")
@@ -634,7 +647,7 @@ if __name__ == "__main__":
         rec_date = def_dates[i]
         future_date = def_future_dates[i]
         min_split_date = rec_date - delta
-        save_for_testing = i == len(def_dates) - 1
+        save_for_testing = True
 
         alg_name = def_name[i] + "_" + rec_date.strftime("%Y-%m-%d")
         # We only generate recommendations for those dates on which we have not previously generated
