@@ -612,15 +612,13 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
             if desired_max <= desired_min:
                 desired_max = desired_min + MIN_POSITIVE_UPLIFT
 
-        _MIN_DICE_TRAIN_ROWS = 10
         dice_train_query = reference_windows[
             (reference_windows[DEFAULT_ITEM_COL] == query_asset_id)
             & (reference_windows[DEFAULT_TIMESTAMP_COL] < query_rec_time)
         ].copy()
-        if len(dice_train_query) < _MIN_DICE_TRAIN_ROWS:
+        if dice_train_query.empty:
             print(
-                f"WARNING: Only {len(dice_train_query)} historical window(s) for asset={query_asset_id} "
-                f"before {query_rec_time} (need {_MIN_DICE_TRAIN_ROWS}). "
+                f"WARNING: No historical windows for asset={query_asset_id} before {query_rec_time}. "
                 "Falling back to all-asset reference windows. CFs may reflect another asset's price scale.",
                 flush=True,
             )
@@ -649,6 +647,7 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
         }
         if args.method == "genetic":
             cf_kwargs["maxiterations"] = int(args.maxiterations)
+            cf_kwargs["population_size"] = max(int(args.total_cfs) + 17, len(dice_train_query))
 
         t0 = time.time()
         try:
