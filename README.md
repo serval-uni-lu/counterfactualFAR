@@ -80,7 +80,7 @@ python3 recommendation.py Far-Trans-Data prices range 2019-08-01 2021-02-26 28 1
 
 **Compute the average metrics**
 ```
-python3 process_results.py
+python3 process_results.py model
 ```
 
 **Generate the counterfactuals**
@@ -95,4 +95,17 @@ Run a single window:
 ```
 python3 generate_rfr_counterfactuals_pkl.py \
   --model-pkl artifacts_for_counterfactuals/rfr_n-100_kpi-full_short_internal_kpis/profitability_recommendation_pipeline_2021-11-23_00-00-00_rfr_n-100_kpi-full_short_internal_kpis.pkl
+```
+
+**Analyse counterfactuals**
+
+Aggregate comparison across all assets (metric distributions + factual vs CF scatter):
+```
+python3 process_results.py cf
+```
+Saves `cf_summary_all_assets.png` and `cf_scatter_all_assets.png` to `stats/plots/cf/`.
+
+Plot the factual vs CF price window for a specific asset and query:
+```
+python3 process_results.py cf --asset-id <ASSET_ID> --query-index <N>
 ```
