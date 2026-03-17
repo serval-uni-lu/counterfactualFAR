@@ -502,6 +502,19 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
         except Exception as e:
             print(f"WARNING: Could not read existing output for resume ({e}); starting fresh", flush=True)
 
+    # If re-running a specific query, remove its existing rows from all output files first.
+    if getattr(args, "query_index", None) is not None and getattr(args, "resume", False):
+        rerun_idx = int(args.query_index)
+        for fpath in [out_cf, out_summary, out_timeseries]:
+            if fpath.exists() and fpath.stat().st_size > 0:
+                try:
+                    df = pd.read_csv(fpath)
+                    df = df[df["query_index"] != rerun_idx]
+                    df.to_csv(fpath, index=False)
+                    print(f"Removed existing rows for query_index={rerun_idx} from {fpath.name}", flush=True)
+                except Exception as e:
+                    print(f"WARNING: Could not clean {fpath.name} for rerun ({e})", flush=True)
+
     prediction_columns = [
         "query_index",
         DEFAULT_ITEM_COL,
@@ -554,7 +567,10 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
         query_rec_time = pd.to_datetime(query_row.iloc[0][DEFAULT_TIMESTAMP_COL])
         query_x = query_row[window_cols]
 
-        if q_idx in done_query_indices:
+        if args.query_index is not None and q_idx != int(args.query_index):
+            continue
+
+        if args.query_index is None and q_idx in done_query_indices:
             print(f"Skipping query-index {q_idx} (already processed)", flush=True)
             continue
 
@@ -761,6 +777,7 @@ def main():
         ),
     )
     parser.add_argument("--asset-id", type=str, default=None, help="Optional single asset to process")
+    parser.add_argument("--query-index", type=int, default=None, help="Run only this specific query index")
     parser.add_argument("--window-size", type=int, default=None)
     parser.add_argument("--n-jobs", type=int, default=1)
     parser.add_argument("--method", type=str, default=DEFAULT_DICE_METHOD, choices=["genetic", "random", "kdtree"])
