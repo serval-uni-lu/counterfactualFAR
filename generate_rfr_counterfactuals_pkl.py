@@ -179,10 +179,32 @@ class RFRPKLWindowWrapper:
         asset_series = asset_series.sort_values(DEFAULT_TIMESTAMP_COL).reset_index(drop=True)
 
         if len(asset_series) < self.min_history_len:
-            raise ValueError(
-                f"Insufficient history for context asset={item_id} at {ts}: "
-                f"need at least {self.min_history_len} rows for internal RFR prediction, got {len(asset_series)}"
+            pad_count = self.min_history_len - len(asset_series)
+            first_ts = asset_series[DEFAULT_TIMESTAMP_COL].iloc[0]
+            first_price = asset_series[DEFAULT_RATING_COL].iloc[0]
+            pad_dates = pd.date_range(end=first_ts - pd.Timedelta(days=1), periods=pad_count, freq="D")
+            pad_rows = pd.DataFrame({
+                DEFAULT_ITEM_COL: item_id,
+                DEFAULT_TIMESTAMP_COL: pad_dates,
+                DEFAULT_RATING_COL: first_price,
+            })
+            # Carry over any extra columns present in asset_series (fill with NaN)
+            for col in asset_series.columns:
+                if col not in pad_rows.columns:
+                    pad_rows[col] = np.nan
+            pad_rows = pad_rows[asset_series.columns]
+            print(
+                f"WARNING: asset={item_id} at {ts} has only {len(asset_series)} rows "
+                f"(need {self.min_history_len}); padding {pad_count} rows backwards "
+                f"with first-known price={first_price:.4f}",
+                flush=True,
             )
+            asset_series = pd.concat([pad_rows, asset_series], ignore_index=True)
+            # Rebuild panel_df to include the synthetic rows for this asset
+            panel_df = pd.concat([
+                pad_rows,
+                panel_df,
+            ], ignore_index=True).sort_values([DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]).reset_index(drop=True)
 
         self._context_item = item_id
         self._context_timestamp = ts
@@ -467,6 +489,19 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
 
     out_cf.parent.mkdir(parents=True, exist_ok=True)
 
+    # Resume: find query indices already written to the output file.
+    done_query_indices: set[int] = set()
+    if getattr(args, "resume", False) and out_cf.exists() and out_cf.stat().st_size > 0:
+        try:
+            existing = pd.read_csv(out_cf, usecols=["query_index"])
+            done_query_indices = set(existing["query_index"].dropna().astype(int).tolist())
+            print(
+                f"Resuming: found {len(done_query_indices)} already-processed query indices in {out_cf}",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"WARNING: Could not read existing output for resume ({e}); starting fresh", flush=True)
+
     prediction_columns = [
         "query_index",
         DEFAULT_ITEM_COL,
@@ -505,9 +540,10 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
         DEFAULT_RATING_COL,
     ]
 
-    pd.DataFrame(columns=prediction_columns).to_csv(out_cf, index=False)
-    pd.DataFrame(columns=window_columns).to_csv(out_summary, index=False)
-    pd.DataFrame(columns=timeseries_columns).to_csv(out_timeseries, index=False)
+    if not done_query_indices:
+        pd.DataFrame(columns=prediction_columns).to_csv(out_cf, index=False)
+        pd.DataFrame(columns=window_columns).to_csv(out_summary, index=False)
+        pd.DataFrame(columns=timeseries_columns).to_csv(out_timeseries, index=False)
 
     print(f"Found {len(query_windows)} query windows from testing CSV")
 
@@ -517,6 +553,10 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
         query_asset_id = query_row.iloc[0][DEFAULT_ITEM_COL]
         query_rec_time = pd.to_datetime(query_row.iloc[0][DEFAULT_TIMESTAMP_COL])
         query_x = query_row[window_cols]
+
+        if q_idx in done_query_indices:
+            print(f"Skipping query-index {q_idx} (already processed)", flush=True)
+            continue
 
         print(
             f"Starting query-index {q_idx} | asset={query_asset_id} | "
@@ -572,13 +612,15 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
             if desired_max <= desired_min:
                 desired_max = desired_min + MIN_POSITIVE_UPLIFT
 
+        _MIN_DICE_TRAIN_ROWS = 10
         dice_train_query = reference_windows[
             (reference_windows[DEFAULT_ITEM_COL] == query_asset_id)
             & (reference_windows[DEFAULT_TIMESTAMP_COL] < query_rec_time)
         ].copy()
-        if dice_train_query.empty:
+        if len(dice_train_query) < _MIN_DICE_TRAIN_ROWS:
             print(
-                f"WARNING: No historical windows for asset={query_asset_id} before {query_rec_time}. "
+                f"WARNING: Only {len(dice_train_query)} historical window(s) for asset={query_asset_id} "
+                f"before {query_rec_time} (need {_MIN_DICE_TRAIN_ROWS}). "
                 "Falling back to all-asset reference windows. CFs may reflect another asset's price scale.",
                 flush=True,
             )
@@ -736,6 +778,12 @@ def main():
         type=float,
         default=None,
         help="Optional global upper bound for desired prediction range",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Resume from last completed query (reads existing output file to skip already-processed indices)",
     )
     args = parser.parse_args()
 
