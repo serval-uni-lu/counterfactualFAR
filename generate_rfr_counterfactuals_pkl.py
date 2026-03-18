@@ -11,8 +11,8 @@ import re
 import time
 import os
 from pathlib import Path
-from threading import local
-from concurrent.futures import ThreadPoolExecutor
+from threading import local, Lock
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import dice_ml
 import numpy as np
@@ -36,7 +36,7 @@ DEFAULT_EXPERIMENT_PKLS = [
 FIXED_WINDOW_SIZE = 21
 DEFAULT_MAX_REFERENCE_WINDOWS = 100
 DEFAULT_DICE_METHOD = "genetic"
-DEFAULT_MAXITERATIONS = 50
+DEFAULT_MAXITERATIONS = 10
 MIN_POSITIVE_UPLIFT = 1e-6
 
 
@@ -134,42 +134,87 @@ def build_window_dataset(
 
 
 class RFRPKLWindowWrapper:
-    """DiCE-compatible predictor: price window -> internal KPI generation -> RF prediction."""
+    """DiCE-compatible predictor: price window -> internal KPI generation -> RF prediction.
+
+    Query context (asset, timestamp, panel, series) is stored in thread-local storage so
+    that multiple queries can be evaluated concurrently without state conflicts.
+    """
 
     def __init__(self, model, window_cols: list[str], full_time_series: pd.DataFrame, n_jobs: int = 1):
         self.model = model
         self.window_cols = list(window_cols)
         self.window_size = len(self.window_cols)
         self.n_jobs = max(1, int(n_jobs))
-        self._rf_jobs_single = self.n_jobs
-        self._rf_jobs_per_thread = 1
         kpi_type = str(getattr(self.model, "kpi_type", "full_short")).lower()
         k = int(getattr(self.model, "k", 5))
         periods = [21, 63, 126] if kpi_type == "short" else [21, 63, 126, 189]
         self.min_history_len = max(self.window_size, max(periods) + k)
         if hasattr(self.model, "model") and hasattr(self.model.model, "n_jobs"):
-            self.model.model.n_jobs = self._rf_jobs_single
+            self.model.model.n_jobs = 1
         self._model_pickle = pickle.dumps(self.model)
         self._thread_local = local()
         self.full_time_series = full_time_series.copy()
         self.full_time_series[DEFAULT_TIMESTAMP_COL] = pd.to_datetime(self.full_time_series[DEFAULT_TIMESTAMP_COL])
         self.full_time_series = self.full_time_series.sort_values([DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]).reset_index(drop=True)
-        self._context_item = None
-        self._context_timestamp = None
-        self._context_panel = None
-        self._context_series = None
-        self._kpi_fallback_warned = False
+
+    # ------------------------------------------------------------------
+    # Thread-local query context properties
+    # Context is keyed to the calling thread so concurrent queries are safe.
+    # ------------------------------------------------------------------
+
+    @property
+    def _context_item(self):
+        return getattr(self._thread_local, "ctx_item", None)
+
+    @_context_item.setter
+    def _context_item(self, v):
+        self._thread_local.ctx_item = v
+
+    @property
+    def _context_timestamp(self):
+        return getattr(self._thread_local, "ctx_ts", None)
+
+    @_context_timestamp.setter
+    def _context_timestamp(self, v):
+        self._thread_local.ctx_ts = v
+
+    @property
+    def _context_panel(self):
+        return getattr(self._thread_local, "ctx_panel", None)
+
+    @_context_panel.setter
+    def _context_panel(self, v):
+        self._thread_local.ctx_panel = v
+
+    @property
+    def _context_series(self):
+        return getattr(self._thread_local, "ctx_series", None)
+
+    @_context_series.setter
+    def _context_series(self, v):
+        self._thread_local.ctx_series = v
+
+    @property
+    def _kpi_fallback_warned(self):
+        return getattr(self._thread_local, "kpi_warned", False)
+
+    @_kpi_fallback_warned.setter
+    def _kpi_fallback_warned(self, v):
+        self._thread_local.kpi_warned = v
+
+    # ------------------------------------------------------------------
 
     def _get_thread_model(self):
+        """Return a thread-local model copy (unpickled once per thread)."""
         if not hasattr(self._thread_local, "model"):
             mdl = pickle.loads(self._model_pickle)
             if hasattr(mdl, "model") and hasattr(mdl.model, "n_jobs"):
-                mdl.model.n_jobs = self._rf_jobs_per_thread
+                mdl.model.n_jobs = 1
             self._thread_local.model = mdl
         return self._thread_local.model
 
     def set_query_context(self, item_id, timestamp):
-        """Set the real asset/timestamp context for one query's CF search."""
+        """Set the real asset/timestamp context for one query's CF search (thread-local)."""
         ts = pd.to_datetime(timestamp)
         panel_df = self.full_time_series[self.full_time_series[DEFAULT_TIMESTAMP_COL] <= ts].copy()
         panel_df = panel_df.sort_values([DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]).reset_index(drop=True)
@@ -179,42 +224,20 @@ class RFRPKLWindowWrapper:
         asset_series = asset_series.sort_values(DEFAULT_TIMESTAMP_COL).reset_index(drop=True)
 
         if len(asset_series) < self.min_history_len:
-            pad_count = self.min_history_len - len(asset_series)
-            first_ts = asset_series[DEFAULT_TIMESTAMP_COL].iloc[0]
-            first_price = asset_series[DEFAULT_RATING_COL].iloc[0]
-            pad_dates = pd.date_range(end=first_ts - pd.Timedelta(days=1), periods=pad_count, freq="D")
-            pad_rows = pd.DataFrame({
-                DEFAULT_ITEM_COL: item_id,
-                DEFAULT_TIMESTAMP_COL: pad_dates,
-                DEFAULT_RATING_COL: first_price,
-            })
-            # Carry over any extra columns present in asset_series (fill with NaN)
-            for col in asset_series.columns:
-                if col not in pad_rows.columns:
-                    pad_rows[col] = np.nan
-            pad_rows = pad_rows[asset_series.columns]
-            print(
-                f"WARNING: asset={item_id} at {ts} has only {len(asset_series)} rows "
-                f"(need {self.min_history_len}); padding {pad_count} rows backwards "
-                f"with first-known price={first_price:.4f}",
-                flush=True,
+            raise ValueError(
+                f"Insufficient history for asset={item_id} at {ts}: "
+                f"need {self.min_history_len} rows, got {len(asset_series)}"
             )
-            asset_series = pd.concat([pad_rows, asset_series], ignore_index=True)
-            # Rebuild panel_df to include the synthetic rows for this asset
-            panel_df = pd.concat([
-                pad_rows,
-                panel_df,
-            ], ignore_index=True).sort_values([DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]).reset_index(drop=True)
 
         self._context_item = item_id
         self._context_timestamp = ts
         self._context_panel = panel_df
         self._context_series = asset_series
-        self._kpi_fallback_warned = False  # reset per-query warning flag
+        self._kpi_fallback_warned = False
 
     def _predict_from_ts_context(self, ts_df: pd.DataFrame, context_item, context_timestamp, model_obj=None) -> float:
         """Score one contextual raw time-series frame via the exact internal RFR path."""
-        model_obj = self.model if model_obj is None else model_obj
+        model_obj = self._get_thread_model() if model_obj is None else model_obj
         try:
             all_preds = np.asarray(model_obj.predict(ts_df)).reshape(-1)
         except ValueError as error:
@@ -262,6 +285,7 @@ class RFRPKLWindowWrapper:
         return float(all_preds[selected_idx])
 
     def predict(self, X):
+        """Evaluate candidate windows against the thread-local query context."""
         # Accept both DataFrame and ndarray inputs because DiCE may use either.
         if isinstance(X, pd.DataFrame):
             arr = X[self.window_cols].astype(np.float64).values
@@ -274,57 +298,36 @@ class RFRPKLWindowWrapper:
         else:
             raise TypeError(f"Expected pandas DataFrame or numpy.ndarray, got {type(X).__name__}")
 
-        # Evaluate each candidate window by mutating contextual raw time-series.
-        # If a batch is provided, optionally parallelize row scoring with thread-local
-        # model copies to avoid shared-state races in transformer.last_kpis_df_.
-        use_parallel = arr.shape[0] > 1 and self.n_jobs > 1
+        context_item = self._context_item
+        context_timestamp = self._context_timestamp
+        context_panel = self._context_panel
+        if context_panel is None or context_item is None or context_timestamp is None:
+            raise ValueError(
+                "Query context is not set. Call set_query_context() before predict(); "
+                "synthetic fallback windows are disabled."
+            )
 
-        print(f"Entered wrapper.predict with batch={arr.shape[0]}", flush=True)
-
-        def _score_one(task) -> float:
-            idx, row_values = task
-            total = arr.shape[0]
-            context_item = self._context_item
+        # Always use the thread-local model copy so concurrent queries do not share
+        # transformer.last_kpis_df_ state and overwrite each other's KPI rows.
+        model_obj = self._get_thread_model()
+        total = arr.shape[0]
+        preds = []
+        for idx in range(total):
             print(
                 f"Processing candidate window {idx + 1}/{total} "
                 f"(candidate_index={idx + 1}, asset={context_item})",
                 flush=True,
             )
-            context_timestamp = self._context_timestamp
-
-            if self._context_panel is None or self._context_item is None or self._context_timestamp is None:
-                raise ValueError(
-                    "Query context is not set. Call set_query_context() before predict(); "
-                    "synthetic fallback windows are disabled."
-                )
-
-            # Filter to query asset only: KPI generation is per-asset independent,
-            # so passing all assets is equivalent but O(N_assets) times slower.
-            ts_df = self._context_panel[self._context_panel[DEFAULT_ITEM_COL] == context_item].copy()
+            ts_df = context_panel[context_panel[DEFAULT_ITEM_COL] == context_item].copy()
             item_indices = ts_df.index.to_numpy()
             if len(item_indices) < self.window_size:
                 raise ValueError(
                     f"Insufficient context rows for CF window replacement on asset={context_item}: "
                     f"need {self.window_size}, got {len(item_indices)}"
                 )
-            target_indices = item_indices[-self.window_size :]
-            ts_df.loc[target_indices, DEFAULT_RATING_COL] = row_values.astype(float)
-
-            if use_parallel:
-                model_obj = self._get_thread_model()
-            else:
-                model_obj = self.model
-            return self._predict_from_ts_context(ts_df, context_item, context_timestamp, model_obj=model_obj)
-
-        if not use_parallel:
-            preds = []
-            for i in range(arr.shape[0]):
-                preds.append(_score_one((i, arr[i])))
-            return np.asarray(preds, dtype=np.float64)
-
-        with ThreadPoolExecutor(max_workers=min(self.n_jobs, arr.shape[0])) as executor:
-            tasks = [(i, arr[i]) for i in range(arr.shape[0])]
-            preds = list(executor.map(_score_one, tasks))
+            target_indices = item_indices[-self.window_size:]
+            ts_df.loc[target_indices, DEFAULT_RATING_COL] = arr[idx].astype(float)
+            preds.append(self._predict_from_ts_context(ts_df, context_item, context_timestamp, model_obj=model_obj))
         return np.asarray(preds, dtype=np.float64)
 
 
@@ -483,24 +486,29 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
     if query_windows.empty:
         raise ValueError("No valid query windows in testing CSV")
 
-    n_jobs = os.cpu_count() if int(args.n_jobs) == -1 else int(args.n_jobs)
-    wrapper = RFRPKLWindowWrapper(model, window_cols, full_time_series=full_history, n_jobs=max(1, n_jobs))
+    n_workers = os.cpu_count() if int(args.n_jobs) == -1 else max(1, int(args.n_jobs))
+    wrapper = RFRPKLWindowWrapper(model, window_cols, full_time_series=full_history, n_jobs=1)
     dice_model = dice_ml.Model(model=wrapper, backend="sklearn", model_type="regressor")
 
     out_cf.parent.mkdir(parents=True, exist_ok=True)
 
-    # Resume: find query indices already written to the output file.
+    # Resume: find query indices already written to any of the three output files.
     done_query_indices: set[int] = set()
-    if getattr(args, "resume", False) and out_cf.exists() and out_cf.stat().st_size > 0:
-        try:
-            existing = pd.read_csv(out_cf, usecols=["query_index"])
-            done_query_indices = set(existing["query_index"].dropna().astype(int).tolist())
+    if getattr(args, "resume", False):
+        for fpath in [out_cf, out_summary, out_timeseries]:
+            if fpath.exists() and fpath.stat().st_size > 0:
+                try:
+                    existing = pd.read_csv(fpath, usecols=["query_index"])
+                    indices = set(existing["query_index"].dropna().astype(int).tolist())
+                    done_query_indices |= indices
+                except Exception as e:
+                    print(f"WARNING: Could not read {fpath.name} for resume ({e})", flush=True)
+        if done_query_indices:
             print(
-                f"Resuming: found {len(done_query_indices)} already-processed query indices in {out_cf}",
+                f"Resuming: found {len(done_query_indices)} already-processed query indices "
+                f"(from cf_details / summary / timeseries)",
                 flush=True,
             )
-        except Exception as e:
-            print(f"WARNING: Could not read existing output for resume ({e}); starting fresh", flush=True)
 
     # If re-running a specific query, remove its existing rows from all output files first.
     if getattr(args, "query_index", None) is not None and getattr(args, "resume", False):
@@ -559,20 +567,32 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
         pd.DataFrame(columns=timeseries_columns).to_csv(out_timeseries, index=False)
 
     print(f"Found {len(query_windows)} query windows from testing CSV")
+    print(f"Running with {n_workers} parallel worker(s)")
 
-    for _, query_row in query_windows.iterrows():
-        query_row = query_row.to_frame().T.copy()
-        q_idx = int(query_row.iloc[0]["query_index_original"])
-        query_asset_id = query_row.iloc[0][DEFAULT_ITEM_COL]
-        query_rec_time = pd.to_datetime(query_row.iloc[0][DEFAULT_TIMESTAMP_COL])
-        query_x = query_row[window_cols]
+    write_lock = Lock()
 
-        if args.query_index is not None and q_idx != int(args.query_index):
-            continue
+    def _write_results(pred_rows, summary_rows, ts_dfs):
+        """Append one query's results to all three output files (call under write_lock)."""
+        for row in pred_rows:
+            pd.DataFrame([row], columns=prediction_columns).to_csv(
+                out_cf, mode="a", header=False, index=False)
+        for row in summary_rows:
+            pd.DataFrame([row], columns=window_columns).to_csv(
+                out_summary, mode="a", header=False, index=False)
+        for ts_df in ts_dfs:
+            ts_df[timeseries_columns].to_csv(
+                out_timeseries, mode="a", header=False, index=False)
 
-        if args.query_index is None and q_idx in done_query_indices:
-            print(f"Skipping query-index {q_idx} (already processed)", flush=True)
-            continue
+    def _run_query(q_idx, row_series):
+        """Process one query. Returns (pred_rows, summary_rows, ts_dfs, was_skipped).
+
+        was_skipped=True  → insufficient data / context error (counted in skipped tally).
+        pred_rows=None    → CF generation ran but found nothing (not counted as skipped).
+        """
+        query_asset_id = row_series[DEFAULT_ITEM_COL]
+        query_rec_time = pd.to_datetime(row_series[DEFAULT_TIMESTAMP_COL])
+        query_row_df = row_series.to_frame().T.copy()
+        query_x = query_row_df[window_cols]
 
         print(
             f"Starting query-index {q_idx} | asset={query_asset_id} | "
@@ -580,21 +600,33 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
             flush=True,
         )
 
-        wrapper.set_query_context(query_asset_id, query_rec_time)
+        try:
+            wrapper.set_query_context(query_asset_id, query_rec_time)
+        except ValueError as e:
+            print(f"Skipping query-index {q_idx}: {e}", flush=True)
+            return None, None, None, True
+
         window_timestamps = wrapper._context_series.tail(window_size)[DEFAULT_TIMESTAMP_COL].values
 
         history_up_to_query = full_history[full_history[DEFAULT_TIMESTAMP_COL] <= query_rec_time].copy()
         validate_no_future_data(history_up_to_query, query_rec_time, "history_up_to_query")
         if history_up_to_query.empty:
-            print(f"Skipping query-index {q_idx}: no history available up to query timestamp")
-            continue
+            print(f"Skipping query-index {q_idx}: no history available up to query timestamp", flush=True)
+            return None, None, None, True
 
-        kpi_scored = _build_kpi_predictions(model, history_up_to_query, query_rec_time)
+        # Use a thread-local model copy so concurrent _generate_kpis_df calls do not
+        # overwrite each other's transformer.last_kpis_df_ state.
+        thread_model = wrapper._get_thread_model()
+        try:
+            kpi_scored = _build_kpi_predictions(thread_model, history_up_to_query, query_rec_time)
+        except Exception as e:
+            print(f"Skipping query-index {q_idx}: KPI generation failed: {e}", flush=True)
+            return None, None, None, True
 
         reference_rows = history_up_to_query[history_up_to_query[DEFAULT_TIMESTAMP_COL] < query_rec_time].copy()
         if reference_rows.empty:
-            print(f"Skipping query-index {q_idx}: no historical rows before query timestamp")
-            continue
+            print(f"Skipping query-index {q_idx}: no historical rows before query timestamp", flush=True)
+            return None, None, None, True
 
         reference_windows = build_window_dataset(history_up_to_query, window_size, query_df=reference_rows)
         reference_windows = reference_windows.merge(
@@ -604,16 +636,13 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
         )
         reference_windows = reference_windows.dropna(subset=["prediction"])
         if reference_windows.empty:
-            print(f"Skipping query-index {q_idx}: reference windows could not be aligned with predictions")
-            continue
+            print(f"Skipping query-index {q_idx}: reference windows could not be aligned with predictions", flush=True)
+            return None, None, None, True
 
         factual_pred = float(wrapper.predict(query_x)[0])
         # TODO: set desired_min = top-k recommendation threshold at query_rec_time instead of
         # factual_pred + ε. The meaningful CF for the recommendation goal is "what price pattern
         # would push this asset into the top-k ranked assets", not just "any improvement".
-        # Load predictions_{date}_{model}.csv, compute predictions.nlargest(top_k).iloc[-1],
-        # and use that as desired_min so DiCE searches for windows that would make this asset
-        # actually recommendable.
         desired_min = factual_pred + MIN_POSITIVE_UPLIFT
 
         if args.desired_max is None:
@@ -642,8 +671,8 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
                 reference_windows[DEFAULT_TIMESTAMP_COL] < query_rec_time
             ].copy()
         if dice_train_query.empty:
-            print(f"Skipping query-index {q_idx}: no reference windows before recommendation time")
-            continue
+            print(f"Skipping query-index {q_idx}: no reference windows before recommendation time", flush=True)
+            return None, None, None, True
 
         max_reference_windows = int(args.max_reference_windows)
         if max_reference_windows > 0 and len(dice_train_query) > max_reference_windows:
@@ -654,20 +683,61 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
             continuous_features=window_cols,
             outcome_name="prediction",
         )
-        exp_query = Dice(dice_data_query, dice_model, method=args.method)
+
+        n_unique_windows = len(dice_train_query.drop_duplicates(subset=window_cols))
+        population_size = int(args.total_cfs) + 17
+        n_above_desired_min = (dice_train_query["prediction"] >= desired_min).sum()
+        effective_method = args.method
+        if args.method == "genetic" and (
+            n_unique_windows < population_size
+            or n_above_desired_min < population_size
+        ):
+            effective_method = "kdtree"
+            print(
+                f"Falling back to kdtree for query-index {q_idx} | asset={query_asset_id}: "
+                f"unique_windows={n_unique_windows}, n_above_desired_min={n_above_desired_min} "
+                f"(need {population_size} for genetic init).",
+                flush=True,
+            )
+
+        exp_query = Dice(dice_data_query, dice_model, method=effective_method)
 
         cf_kwargs = {
             "total_CFs": int(args.total_cfs),
             "desired_range": [desired_min, desired_max],
             "features_to_vary": list(window_cols),
         }
-        if args.method == "genetic":
+        if effective_method == "genetic":
             cf_kwargs["maxiterations"] = int(args.maxiterations)
-            cf_kwargs["population_size"] = max(int(args.total_cfs) + 17, len(dice_train_query))
 
         t0 = time.time()
         try:
             dice_exp = exp_query.generate_counterfactuals(query_x, **cf_kwargs)
+        except ValueError as error:
+            if "empty range for randrange" in str(error) and effective_method == "genetic":
+                print(
+                    f"Genetic algorithm failed (empty population) for query-index {q_idx} | "
+                    f"asset={query_asset_id} — retrying with kdtree.",
+                    flush=True,
+                )
+                effective_method = "kdtree"
+                exp_query = Dice(dice_data_query, dice_model, method="kdtree")
+                cf_kwargs.pop("maxiterations", None)
+                try:
+                    dice_exp = exp_query.generate_counterfactuals(query_x, **cf_kwargs)
+                except UserConfigValidationException as retry_error:
+                    msg = str(retry_error)
+                    if "No counterfactuals found" in msg:
+                        elapsed = time.time() - t0
+                        print(
+                            f"No counterfactuals found for query-index {q_idx} | "
+                            f"asset={query_asset_id} | timestamp={query_rec_time} | elapsed={elapsed:.1f}s",
+                            flush=True,
+                        )
+                        return None, None, None, False
+                    raise
+            else:
+                raise
         except UserConfigValidationException as error:
             msg = str(error)
             if "No counterfactuals found" in msg:
@@ -677,8 +747,9 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
                     f"asset={query_asset_id} | timestamp={query_rec_time} | elapsed={elapsed:.1f}s",
                     flush=True,
                 )
-                continue
+                return None, None, None, False
             raise
+
         elapsed = time.time() - t0
         final_cfs = dice_exp.cf_examples_list[0].final_cfs_df
         if final_cfs is None or final_cfs.empty:
@@ -687,7 +758,8 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
                 f"asset={query_asset_id} | timestamp={query_rec_time} | elapsed={elapsed:.1f}s",
                 flush=True,
             )
-            continue
+            return None, None, None, False
+
         final_cfs = final_cfs.copy()
         print(
             f"Found {len(final_cfs)} CF(s) for query-index {q_idx} | "
@@ -695,24 +767,25 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
             flush=True,
         )
 
+        pred_rows = []
+        summary_rows = []
+        ts_dfs = []
+
         for cf_idx, (_, cf_row) in enumerate(final_cfs.iterrows()):
-            # DiCE already evaluated each CF via the wrapper; reuse the stored prediction
-            # rather than re-running the full KPI pipeline for every CF.
-            # Fall back to re-prediction if DiCE didn't store the outcome column.
             if "prediction" in cf_row.index:
                 cf_pred = float(cf_row["prediction"])
             else:
                 cf_x = pd.DataFrame([cf_row[window_cols].to_dict()])
                 cf_pred = float(wrapper.predict(cf_x)[0])
 
-            factual_win = np.array([float(query_row.iloc[0][col]) for col in window_cols])
+            factual_win = np.array([float(row_series[col]) for col in window_cols])
             cf_win = np.array([float(cf_row[col]) for col in window_cols])
             factual_window_map = dict(zip(window_cols, factual_win.tolist()))
             cf_window_map = dict(zip(window_cols, cf_win.tolist()))
 
             metrics = _cf_utility_metrics(factual_win, cf_win, factual_pred, cf_pred, desired_min, desired_max)
 
-            prediction_row = {
+            pred_rows.append({
                 "query_index": q_idx,
                 DEFAULT_ITEM_COL: query_asset_id,
                 DEFAULT_TIMESTAMP_COL: query_rec_time,
@@ -724,37 +797,77 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
                 "desired_min": desired_min,
                 "desired_max": desired_max,
                 **metrics,
+            })
+            summary_rows.extend([
+                {
+                    "query_index": q_idx,
+                    DEFAULT_ITEM_COL: query_asset_id,
+                    DEFAULT_TIMESTAMP_COL: query_rec_time,
+                    "cf_index": cf_idx,
+                    "row_type": "factual",
+                    "window_line": json.dumps(factual_window_map),
+                },
+                {
+                    "query_index": q_idx,
+                    DEFAULT_ITEM_COL: query_asset_id,
+                    DEFAULT_TIMESTAMP_COL: query_rec_time,
+                    "cf_index": cf_idx,
+                    "row_type": "counterfactual",
+                    "window_line": json.dumps(cf_window_map),
+                },
+            ])
+            ts_dfs.append(_window_to_timeseries(cf_win, window_timestamps, query_asset_id, q_idx))
+
+        return pred_rows, summary_rows, ts_dfs, False
+
+    # ------------------------------------------------------------------ #
+    # Build the list of queries to process (after resume/skip filtering). #
+    # ------------------------------------------------------------------ #
+    queries_to_run = []
+    for _, query_row in query_windows.iterrows():
+        q_idx = int(query_row["query_index_original"])
+        if args.query_index is not None and q_idx < int(args.query_index):
+            continue
+        if args.query_index is None and q_idx in done_query_indices:
+            print(f"Skipping query-index {q_idx} (already processed)", flush=True)
+            continue
+        queries_to_run.append((q_idx, query_row))
+
+    skipped_indices = []
+
+    if n_workers == 1:
+        # Sequential path — simpler to debug, no overhead.
+        for q_idx, row_series in queries_to_run:
+            pred_rows, summary_rows, ts_dfs, was_skipped = _run_query(q_idx, row_series)
+            if was_skipped:
+                skipped_indices.append(q_idx)
+            elif pred_rows is not None:
+                _write_results(pred_rows, summary_rows, ts_dfs)
+    else:
+        # Parallel path — each worker thread holds its own model copy and query context
+        # via thread-local storage; file writes are serialised with write_lock.
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            future_to_qidx = {
+                executor.submit(_run_query, q_idx, row_series): q_idx
+                for q_idx, row_series in queries_to_run
             }
+            for future in as_completed(future_to_qidx):
+                q_idx_done = future_to_qidx[future]
+                try:
+                    pred_rows, summary_rows, ts_dfs, was_skipped = future.result()
+                except Exception as exc:
+                    print(f"Query {q_idx_done} raised an exception: {exc}", flush=True)
+                    skipped_indices.append(q_idx_done)
+                    continue
+                if was_skipped:
+                    skipped_indices.append(q_idx_done)
+                elif pred_rows is not None:
+                    with write_lock:
+                        _write_results(pred_rows, summary_rows, ts_dfs)
 
-            factual_window_row = {
-                "query_index": q_idx,
-                DEFAULT_ITEM_COL: query_asset_id,
-                DEFAULT_TIMESTAMP_COL: query_rec_time,
-                "cf_index": cf_idx,
-                "row_type": "factual",
-                "window_line": json.dumps(factual_window_map),
-            }
-            counterfactual_window_row = {
-                "query_index": q_idx,
-                DEFAULT_ITEM_COL: query_asset_id,
-                DEFAULT_TIMESTAMP_COL: query_rec_time,
-                "cf_index": cf_idx,
-                "row_type": "counterfactual",
-                "window_line": json.dumps(cf_window_map),
-            }
-
-            cf_ts_df = _window_to_timeseries(cf_win, window_timestamps, query_asset_id, q_idx)
-
-            pd.DataFrame([prediction_row], columns=prediction_columns).to_csv(
-                out_cf, mode="a", header=False, index=False,
-            )
-            pd.DataFrame([factual_window_row, counterfactual_window_row], columns=window_columns).to_csv(
-                out_summary, mode="a", header=False, index=False,
-            )
-            cf_ts_df[timeseries_columns].to_csv(
-                out_timeseries, mode="a", header=False, index=False,
-            )
-
+    n_total = len(query_windows)
+    n_skipped = len(skipped_indices)
+    print(f"Skipped queries       : {n_skipped}/{n_total} ({100*n_skipped/n_total:.1f}%)")
     print(f"Saved counterfactuals : {out_cf}")
     print(f"Saved summary         : {out_summary}")
     print(f"Saved timeseries      : {out_timeseries}")
@@ -779,7 +892,16 @@ def main():
     parser.add_argument("--asset-id", type=str, default=None, help="Optional single asset to process")
     parser.add_argument("--query-index", type=int, default=None, help="Run only this specific query index")
     parser.add_argument("--window-size", type=int, default=None)
-    parser.add_argument("--n-jobs", type=int, default=1)
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=14,
+        help=(
+            "Number of queries to process in parallel. Each worker runs a full DiCE search "
+            "on a separate thread with its own model copy and query context. "
+            "Use -1 to use all available CPU cores (currently %d)." % (os.cpu_count() or 1)
+        ),
+    )
     parser.add_argument("--method", type=str, default=DEFAULT_DICE_METHOD, choices=["genetic", "random", "kdtree"])
     parser.add_argument("--maxiterations", type=int, default=DEFAULT_MAXITERATIONS)
     parser.add_argument("--total-cfs", type=int, default=1)
