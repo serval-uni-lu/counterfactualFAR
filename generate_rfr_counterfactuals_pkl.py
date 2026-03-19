@@ -608,7 +608,10 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
 
         window_timestamps = wrapper._context_series.tail(window_size)[DEFAULT_TIMESTAMP_COL].values
 
-        history_up_to_query = full_history[full_history[DEFAULT_TIMESTAMP_COL] <= query_rec_time].copy()
+        history_up_to_query = full_history[
+            (full_history[DEFAULT_TIMESTAMP_COL] <= query_rec_time) &
+            (full_history[DEFAULT_ITEM_COL] == query_asset_id)
+        ].copy()
         validate_no_future_data(history_up_to_query, query_rec_time, "history_up_to_query")
         if history_up_to_query.empty:
             print(f"Skipping query-index {q_idx}: no history available up to query timestamp", flush=True)
@@ -654,8 +657,14 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
             desired_max = max(float(asset_ref_max), desired_min + MIN_POSITIVE_UPLIFT)
         else:
             desired_max = float(args.desired_max)
-            if desired_max <= desired_min:
-                desired_max = desired_min + MIN_POSITIVE_UPLIFT
+
+        if desired_max <= desired_min:
+            print(
+                f"Skipping query-index {q_idx} | asset={query_asset_id}: "
+                f"factual score ({factual_pred:.6f}) already at or above reference max ({desired_max:.6f}); no room for improvement.",
+                flush=True,
+            )
+            return None, None, None, True
 
         dice_train_query = reference_windows[
             (reference_windows[DEFAULT_ITEM_COL] == query_asset_id)
@@ -687,6 +696,16 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
         n_unique_windows = len(dice_train_query.drop_duplicates(subset=window_cols))
         population_size = int(args.total_cfs) + 17
         n_above_desired_min = (dice_train_query["prediction"] >= desired_min).sum()
+
+        if n_above_desired_min == 0:
+            print(
+                f"Skipping query-index {q_idx} | asset={query_asset_id}: "
+                f"no reference window has prediction >= desired_min ({desired_min:.6f}); "
+                f"DiCE cannot find a counterfactual.",
+                flush=True,
+            )
+            return None, None, None, False
+
         effective_method = args.method
         if args.method == "genetic" and (
             n_unique_windows < population_size
