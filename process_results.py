@@ -219,58 +219,60 @@ def _plot_timeseries_all_assets(details_files, out_dir, artifacts_dir=None):
                 testing_df["col_timestamp"] = pd.to_datetime(testing_df["col_timestamp"])
                 testing_df = testing_df.sort_values(["col_item", "col_timestamp"])
 
-        assets = cf_df["col_item"].unique()
-        fig, axes = plt.subplots(len(assets), 1, figsize=(14, 4 * len(assets)), squeeze=False)
+        assets = list(cf_df["col_item"].unique())
+        assets_per_page = 5
+        asset_out_dir = os.path.join(out_dir, f"cf_timeseries_{exp_tag}")
+        os.makedirs(asset_out_dir, exist_ok=True)
 
-        for ax, asset in zip(axes[:, 0], assets):
-            # Full factual series from testing data (all points)
-            if testing_df is not None:
-                full_series = testing_df[testing_df["col_item"] == asset]
-                ax.plot(full_series["col_timestamp"], full_series["col_rating"],
-                        label="Factual", color="#0181cb", linewidth=1.5)
+        for page_i, page_start in enumerate(range(0, len(assets), assets_per_page)):
+            page_assets = assets[page_start: page_start + assets_per_page]
+            fig, axes = plt.subplots(len(page_assets), 1, figsize=(14, 4 * len(page_assets)), squeeze=False)
 
-            # CF points overlaid — connect consecutive CF points only if no factual
-            # trading day exists between them (i.e. gap is weekends/holidays only).
-            # If the factual has a point in between but CF doesn't, break the line.
-            asset_cf = cf_df[cf_df["col_item"] == asset].sort_values("col_timestamp").reset_index(drop=True)
-            if testing_df is not None:
-                factual_dates = set(testing_df[testing_df["col_item"] == asset]["col_timestamp"])
-            else:
-                factual_dates = set()
+            for ax, asset in zip(axes[:, 0], page_assets):
+                if testing_df is not None:
+                    full_series = testing_df[testing_df["col_item"] == asset]
+                    ax.plot(full_series["col_timestamp"], full_series["col_rating"],
+                            label="Factual", color="#0181cb", linewidth=1.5)
 
-            cf_ts_plot = []
-            cf_val_plot = []
-            for i, row in asset_cf.iterrows():
-                cf_ts_plot.append(row["col_timestamp"])
-                cf_val_plot.append(row["cf_rating"])
-                if i < len(asset_cf) - 1:
-                    next_ts = asset_cf.loc[i + 1, "col_timestamp"]
-                    between = [d for d in factual_dates
-                               if row["col_timestamp"] < d < next_ts]
-                    if between:
-                        cf_ts_plot.append(next_ts)
-                        cf_val_plot.append(float("nan"))
+                asset_cf = cf_df[cf_df["col_item"] == asset].sort_values("col_timestamp").reset_index(drop=True)
+                if testing_df is not None:
+                    factual_dates = set(testing_df[testing_df["col_item"] == asset]["col_timestamp"])
+                else:
+                    factual_dates = set()
 
-            ax.plot(cf_ts_plot, cf_val_plot,
-                    label="CF", color="#ffbc42", linewidth=1.5, marker="o", markersize=3)
+                cf_ts_plot = []
+                cf_val_plot = []
+                for i, row in asset_cf.iterrows():
+                    cf_ts_plot.append(row["col_timestamp"])
+                    cf_val_plot.append(row["cf_rating"])
+                    if i < len(asset_cf) - 1:
+                        next_ts = asset_cf.loc[i + 1, "col_timestamp"]
+                        between = [d for d in factual_dates
+                                   if row["col_timestamp"] < d < next_ts]
+                        if between:
+                            cf_ts_plot.append(next_ts)
+                            cf_val_plot.append(float("nan"))
 
-            # If no testing data, fall back to factual_rating from cf_details
-            if testing_df is None:
-                ax.plot(asset_cf["col_timestamp"], asset_cf["factual_rating"],
-                        label="Factual", color="#0181cb", linewidth=1.5, marker="o", markersize=3)
+                ax.plot(cf_ts_plot, cf_val_plot,
+                        label="CF", color="#ffbc42", linewidth=1.5, marker="o", markersize=3)
 
-            ax.set_title(f"Asset {asset}")
-            ax.set_ylabel("Price")
-            ax.legend()
-            ax.tick_params(axis="x", rotation=30)
-            ax.grid(axis="y", linestyle="--", alpha=0.3)
+                if testing_df is None:
+                    ax.plot(asset_cf["col_timestamp"], asset_cf["factual_rating"],
+                            label="Factual", color="#0181cb", linewidth=1.5, marker="o", markersize=3)
 
-        fig.suptitle(f"Factual vs CF price over time | {exp_tag}", fontsize=13)
-        fig.tight_layout()
-        out_path = os.path.join(out_dir, f"cf_timeseries_{exp_tag}.png")
-        fig.savefig(out_path, dpi=150)
-        plt.close(fig)
-        print(f"Saved: {out_path}")
+                ax.set_title(f"Asset {asset}")
+                ax.set_ylabel("Price")
+                ax.legend()
+                ax.tick_params(axis="x", rotation=30)
+                ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+            fig.tight_layout()
+            out_path = os.path.join(asset_out_dir, f"page_{page_i + 1:03d}.png")
+            fig.savefig(out_path, dpi=150)
+            plt.close(fig)
+
+        n_pages = -(-len(assets) // assets_per_page)
+        print(f"Saved {n_pages} page(s) ({len(assets)} assets) to: {asset_out_dir}")
 
 
 def _plot_all_assets_summary(details_files, out_dir):
