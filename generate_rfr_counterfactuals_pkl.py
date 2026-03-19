@@ -711,13 +711,14 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
             n_unique_windows < population_size
             or n_above_desired_min < population_size
         ):
-            effective_method = "kdtree"
             print(
-                f"Falling back to kdtree for query-index {q_idx} | asset={query_asset_id}: "
-                f"unique_windows={n_unique_windows}, n_above_desired_min={n_above_desired_min} "
-                f"(need {population_size} for genetic init).",
+                f"Skipping query-index {q_idx} | asset={query_asset_id}: "
+                f"insufficient reference windows for genetic search "
+                f"(unique_windows={n_unique_windows}, n_above_desired_min={n_above_desired_min}, "
+                f"need {population_size}).",
                 flush=True,
             )
+            return None, None, None, False
 
         exp_query = Dice(dice_data_query, dice_model, method=effective_method)
 
@@ -734,27 +735,14 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
             dice_exp = exp_query.generate_counterfactuals(query_x, **cf_kwargs)
         except ValueError as error:
             if "empty range for randrange" in str(error) and effective_method == "genetic":
+                elapsed = time.time() - t0
                 print(
-                    f"Genetic algorithm failed (empty population) for query-index {q_idx} | "
-                    f"asset={query_asset_id} — retrying with kdtree.",
+                    f"Skipping query-index {q_idx} | asset={query_asset_id}: "
+                    f"genetic algorithm failed (empty population) — too few valid candidates. "
+                    f"elapsed={elapsed:.1f}s",
                     flush=True,
                 )
-                effective_method = "kdtree"
-                exp_query = Dice(dice_data_query, dice_model, method="kdtree")
-                cf_kwargs.pop("maxiterations", None)
-                try:
-                    dice_exp = exp_query.generate_counterfactuals(query_x, **cf_kwargs)
-                except UserConfigValidationException as retry_error:
-                    msg = str(retry_error)
-                    if "No counterfactuals found" in msg:
-                        elapsed = time.time() - t0
-                        print(
-                            f"No counterfactuals found for query-index {q_idx} | "
-                            f"asset={query_asset_id} | timestamp={query_rec_time} | elapsed={elapsed:.1f}s",
-                            flush=True,
-                        )
-                        return None, None, None, False
-                    raise
+                return None, None, None, False
             else:
                 raise
         except UserConfigValidationException as error:
