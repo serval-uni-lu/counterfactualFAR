@@ -38,6 +38,7 @@ DEFAULT_MAX_REFERENCE_WINDOWS = 100
 DEFAULT_DICE_METHOD = "genetic"
 DEFAULT_MAXITERATIONS = 10
 MIN_POSITIVE_UPLIFT = 1e-6
+MAX_PREDICT_CALLS = 500  # hard limit on predict() calls per query to prevent runaway genetic search
 
 
 def _load_model(model_path: Path):
@@ -234,6 +235,7 @@ class RFRPKLWindowWrapper:
         self._context_panel = panel_df
         self._context_series = asset_series
         self._kpi_fallback_warned = False
+        self._thread_local.predict_call_count = 0
 
     def _predict_from_ts_context(self, ts_df: pd.DataFrame, context_item, context_timestamp, model_obj=None) -> float:
         """Score one contextual raw time-series frame via the exact internal RFR path."""
@@ -286,6 +288,13 @@ class RFRPKLWindowWrapper:
 
     def predict(self, X):
         """Evaluate candidate windows against the thread-local query context."""
+        self._thread_local.predict_call_count = getattr(self._thread_local, "predict_call_count", 0) + 1
+        if self._thread_local.predict_call_count > MAX_PREDICT_CALLS:
+            raise RuntimeError(
+                f"predict() call limit ({MAX_PREDICT_CALLS}) exceeded for asset={self._context_item} — "
+                "aborting runaway DiCE search."
+            )
+
         # Accept both DataFrame and ndarray inputs because DiCE may use either.
         if isinstance(X, pd.DataFrame):
             arr = X[self.window_cols].astype(np.float64).values
@@ -428,14 +437,14 @@ def _derive_data_paths(pkl_path: Path) -> tuple[Path, Path]:
     )
 
 
-def _derive_output_paths(pkl_path: Path) -> tuple[Path, Path, Path]:
-    """Derive the three output CSV paths from the pkl path."""
+def _derive_output_paths(pkl_path: Path, method: str) -> tuple[Path, Path, Path]:
+    """Derive the three output CSV paths from the pkl path, including the CF method."""
     pkl_name = pkl_path.stem
     model_dir = pkl_path.parent.name
     date_match = re.search(r"(\d{4}-\d{2}-\d{2})", pkl_name)
     date_tag = date_match.group(1) if date_match else "unknown_date"
     out_dir = Path("counterfactuals") / model_dir
-    tag = f"{model_dir}_{date_tag}"
+    tag = f"{model_dir}_{date_tag}_{method}"
     return (
         out_dir / f"cf_details_{tag}.csv",
         out_dir / f"summary_{tag}.csv",
@@ -687,38 +696,69 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
         if max_reference_windows > 0 and len(dice_train_query) > max_reference_windows:
             dice_train_query = dice_train_query.tail(max_reference_windows).copy()
 
+        n_unique_windows = len(dice_train_query.drop_duplicates(subset=window_cols))
+        population_size = int(args.total_cfs) + 17
+        n_above_desired_min = (dice_train_query["prediction"] >= desired_min).sum()
+        n_in_desired_range = (
+            (dice_train_query["prediction"] >= desired_min) &
+            (dice_train_query["prediction"] <= desired_max)
+        ).sum()
+
+        effective_method = args.method
+
+        if effective_method == "kdtree":
+            # For kdtree, pre-filter dice_train_query to only windows already within the
+            # desired range. This guarantees every candidate in the KD-tree is valid,
+            # preventing the verification-mismatch infinite loop where DiCE finds a
+            # candidate via stored predictions but wrapper.predict() disagrees and keeps
+            # searching with no remaining candidates.
+            if n_in_desired_range == 0:
+                print(
+                    f"Skipping query-index {q_idx} | asset={query_asset_id}: "
+                    f"no reference window has prediction in [desired_min={desired_min:.6f}, "
+                    f"desired_max={desired_max:.6f}]; kdtree has no valid candidates.",
+                    flush=True,
+                )
+                return None, None, None, False
+            dice_train_query = dice_train_query[
+                (dice_train_query["prediction"] >= desired_min) &
+                (dice_train_query["prediction"] <= desired_max)
+            ].copy()
+
+        elif effective_method == "genetic":
+            if n_above_desired_min == 0:
+                print(
+                    f"Skipping query-index {q_idx} | asset={query_asset_id}: "
+                    f"no reference window has prediction >= desired_min ({desired_min:.6f}); "
+                    f"DiCE cannot find a counterfactual.",
+                    flush=True,
+                )
+                return None, None, None, False
+            if n_unique_windows < population_size or n_above_desired_min < population_size:
+                print(
+                    f"Skipping query-index {q_idx} | asset={query_asset_id}: "
+                    f"insufficient reference windows for genetic search "
+                    f"(unique_windows={n_unique_windows}, n_above_desired_min={n_above_desired_min}, "
+                    f"need {population_size}).",
+                    flush=True,
+                )
+                return None, None, None, False
+
+        else:
+            # random / other methods: only need at least 1 window in desired range
+            if n_in_desired_range == 0:
+                print(
+                    f"Skipping query-index {q_idx} | asset={query_asset_id}: "
+                    f"no reference window in desired range; cannot seed search.",
+                    flush=True,
+                )
+                return None, None, None, False
+
         dice_data_query = dice_ml.Data(
             dataframe=dice_train_query[window_cols + ["prediction"]],
             continuous_features=window_cols,
             outcome_name="prediction",
         )
-
-        n_unique_windows = len(dice_train_query.drop_duplicates(subset=window_cols))
-        population_size = int(args.total_cfs) + 17
-        n_above_desired_min = (dice_train_query["prediction"] >= desired_min).sum()
-
-        if n_above_desired_min == 0:
-            print(
-                f"Skipping query-index {q_idx} | asset={query_asset_id}: "
-                f"no reference window has prediction >= desired_min ({desired_min:.6f}); "
-                f"DiCE cannot find a counterfactual.",
-                flush=True,
-            )
-            return None, None, None, False
-
-        effective_method = args.method
-        if args.method == "genetic" and (
-            n_unique_windows < population_size
-            or n_above_desired_min < population_size
-        ):
-            print(
-                f"Skipping query-index {q_idx} | asset={query_asset_id}: "
-                f"insufficient reference windows for genetic search "
-                f"(unique_windows={n_unique_windows}, n_above_desired_min={n_above_desired_min}, "
-                f"need {population_size}).",
-                flush=True,
-            )
-            return None, None, None, False
 
         exp_query = Dice(dice_data_query, dice_model, method=effective_method)
 
@@ -745,6 +785,17 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
                 return None, None, None, False
             else:
                 raise
+        except RuntimeError as error:
+            if "predict() call limit" in str(error):
+                elapsed = time.time() - t0
+                print(
+                    f"Skipping query-index {q_idx} | asset={query_asset_id}: "
+                    f"predict() call limit ({MAX_PREDICT_CALLS}) exceeded — DiCE search aborted. "
+                    f"elapsed={elapsed:.1f}s",
+                    flush=True,
+                )
+                return None, None, None, False
+            raise
         except UserConfigValidationException as error:
             msg = str(error)
             if "No counterfactuals found" in msg:
@@ -937,7 +988,7 @@ def main():
 
     for pkl_path in args.model_pkl:
         training_path, testing_path = _derive_data_paths(pkl_path)
-        out_cf, out_summary, out_timeseries = _derive_output_paths(pkl_path)
+        out_cf, out_summary, out_timeseries = _derive_output_paths(pkl_path, args.method)
         _run_for_pkl(pkl_path, training_path, testing_path, out_cf, out_summary, out_timeseries, args)
 
 
