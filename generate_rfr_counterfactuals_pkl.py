@@ -38,7 +38,7 @@ DEFAULT_MAX_REFERENCE_WINDOWS = 100
 DEFAULT_DICE_METHOD = "genetic"
 DEFAULT_MAXITERATIONS = 10
 MIN_POSITIVE_UPLIFT = 1e-6
-MAX_PREDICT_CALLS = 500  # hard limit on predict() calls per query to prevent runaway genetic search
+MAX_PREDICT_CALLS = 300  # hard limit on predict() calls per query to prevent runaway genetic search
 
 
 def _load_model(model_path: Path):
@@ -323,11 +323,11 @@ class RFRPKLWindowWrapper:
         total = arr.shape[0]
         preds = []
         for idx in range(total):
-            print(
-                f"Processing candidate window {idx + 1}/{total} "
-                f"(candidate_index={idx + 1}, asset={context_item})",
-                flush=True,
-            )
+            # print(
+            #     f"Processing candidate window {idx + 1}/{total} "
+            #     f"(candidate_index={idx + 1}, asset={context_item})",
+            #     flush=True,
+            # )
             ts_df = context_panel[context_panel[DEFAULT_ITEM_COL] == context_item].copy()
             item_indices = ts_df.index.to_numpy()
             if len(item_indices) < self.window_size:
