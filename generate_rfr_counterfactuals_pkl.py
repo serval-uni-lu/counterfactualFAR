@@ -146,10 +146,11 @@ class RFRPKLWindowWrapper:
         self.window_cols = list(window_cols)
         self.window_size = len(self.window_cols)
         self.n_jobs = max(1, int(n_jobs))
-        kpi_type = str(getattr(self.model, "kpi_type", "full_short")).lower()
         k = int(getattr(self.model, "k", 5))
-        periods = [21, 63, 126] if kpi_type == "short" else [21, 63, 126, 189]
-        self.min_history_len = max(self.window_size, max(periods) + k)
+        kpi_features = getattr(self.model, "kpi_features", None) or []
+        period_values = [int(m) for f in kpi_features for m in re.findall(r"(\d+)d", f)]
+        max_period = max(period_values) if period_values else 126
+        self.min_history_len = max(self.window_size, max_period + k)
         if hasattr(self.model, "model") and hasattr(self.model.model, "n_jobs"):
             self.model.model.n_jobs = 1
         self._model_pickle = pickle.dumps(self.model)
@@ -953,7 +954,7 @@ def main():
     parser.add_argument(
         "--n-jobs",
         type=int,
-        default=14,
+        default=20,
         help=(
             "Number of queries to process in parallel. Each worker runs a full DiCE search "
             "on a separate thread with its own model copy and query context. "
