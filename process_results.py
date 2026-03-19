@@ -109,7 +109,7 @@ def save_all_models_plots(all_run_stats_tables):
     if not all_run_stats_tables:
         return
 
-    plot_root = os.path.join(STATS_DIR, "plots")
+    plot_root = os.path.join(STATS_DIR, "plots", "model")
     os.makedirs(plot_root, exist_ok=True)
 
     long_rows = []
@@ -377,7 +377,8 @@ def main():
         plot_cf_analysis(args.cf_dir, args.asset_id, args.query_index, args.out_dir, args=args)
         return
 
-    os.makedirs(STATS_DIR, exist_ok=True)
+    model_stats_dir = os.path.join(STATS_DIR, "model")
+    os.makedirs(model_stats_dir, exist_ok=True)
     all_run_stats_tables = []
 
     model_folders = [
@@ -405,7 +406,7 @@ def main():
                 continue
 
             full_stats = compute_full_stats_per_metric(all_metrics)
-            output_file = os.path.join(STATS_DIR, f"{run_prefix}.csv")
+            output_file = os.path.join(model_stats_dir, f"{run_prefix}.csv")
             full_stats.to_csv(output_file, index=False)
             run_stats_tables.append((run_prefix, full_stats))
             all_run_stats_tables.append((run_prefix, full_stats))
@@ -413,18 +414,18 @@ def main():
             # Per-experiment stats (including unclassified if present)
             for exp_label, exp_df in all_metrics.groupby("experiment"):
                 exp_stats = compute_full_stats_per_metric(exp_df)
-                exp_output_file = os.path.join(STATS_DIR, f"{run_prefix}_{exp_label}.csv")
+                exp_output_file = os.path.join(model_stats_dir, f"{run_prefix}_{exp_label}.csv")
                 exp_stats.to_csv(exp_output_file, index=False)
 
             print(f"Model run: {run_prefix}")
             print(f"  Windows used: {len(metric_files)}")
             print(f"  Saved stats: {output_file}")
-            print(f"  Saved per-experiment stats in: {STATS_DIR}")
+            print(f"  Saved per-experiment stats in: {model_stats_dir}")
 
         print(f"  Saved stats for model group: {model_name}")
 
     save_all_models_plots(all_run_stats_tables)
-    print(f"Saved all-model plots in: {os.path.join(STATS_DIR, 'plots')}")
+    print(f"Saved all-model plots in: {os.path.join(STATS_DIR, 'plots', 'model')}")
 
 
 if __name__ == "__main__":
