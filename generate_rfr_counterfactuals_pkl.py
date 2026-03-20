@@ -27,8 +27,8 @@ _ARTIFACTS_DIR = Path("artifacts_for_counterfactuals")
 _MODEL_TAG = "rfr_n-100_kpi-full_short_internal_kpis"
 
 # Last window of each experiment:
-#   exp1: 2019-08-01 → 2020-08-28
-#   exp2: 2020-09-14 → 2021-11-23
+#   exp1: 2019-08-01 -> 2020-08-28
+#   exp2: 2020-09-14 -> 2021-11-23
 DEFAULT_EXPERIMENT_PKLS = [
     _ARTIFACTS_DIR / _MODEL_TAG / f"profitability_recommendation_pipeline_2020-08-28_00-00-00_{_MODEL_TAG}.pkl",
     _ARTIFACTS_DIR / _MODEL_TAG / f"profitability_recommendation_pipeline_2021-11-23_00-00-00_{_MODEL_TAG}.pkl",
@@ -38,7 +38,7 @@ DEFAULT_MAX_REFERENCE_WINDOWS = 100
 DEFAULT_DICE_METHOD = "genetic"
 DEFAULT_MAXITERATIONS = 10
 MIN_POSITIVE_UPLIFT = 1e-6
-MAX_PREDICT_CALLS = 300  # hard limit on predict() calls per query to prevent runaway genetic search
+MAX_DICE_SECONDS = 600  # raise RuntimeError if DiCE predict() is still running after this many seconds
 
 
 def _load_model(model_path: Path):
@@ -236,7 +236,7 @@ class RFRPKLWindowWrapper:
         self._context_panel = panel_df
         self._context_series = asset_series
         self._kpi_fallback_warned = False
-        self._thread_local.predict_call_count = 0
+        self._thread_local.dice_deadline = time.time() + MAX_DICE_SECONDS
 
     def _predict_from_ts_context(self, ts_df: pd.DataFrame, context_item, context_timestamp, model_obj=None) -> float:
         """Score one contextual raw time-series frame via the exact internal RFR path."""
@@ -289,10 +289,10 @@ class RFRPKLWindowWrapper:
 
     def predict(self, X):
         """Evaluate candidate windows against the thread-local query context."""
-        self._thread_local.predict_call_count = getattr(self._thread_local, "predict_call_count", 0) + 1
-        if self._thread_local.predict_call_count > MAX_PREDICT_CALLS:
+        deadline = getattr(self._thread_local, "dice_deadline", None)
+        if deadline is not None and time.time() > deadline:
             raise RuntimeError(
-                f"predict() call limit ({MAX_PREDICT_CALLS}) exceeded for asset={self._context_item} — "
+                f"DiCE search exceeded {MAX_DICE_SECONDS}s time limit for asset={self._context_item} — "
                 "aborting runaway DiCE search."
             )
 
@@ -320,23 +320,22 @@ class RFRPKLWindowWrapper:
         # Always use the thread-local model copy so concurrent queries do not share
         # transformer.last_kpis_df_ state and overwrite each other's KPI rows.
         model_obj = self._get_thread_model()
-        total = arr.shape[0]
+
+        # Filter and validate once outside the loop — asset rows are identical for all candidates.
+        asset_base = context_panel[context_panel[DEFAULT_ITEM_COL] == context_item]
+        item_indices = asset_base.index.to_numpy()
+        if len(item_indices) < self.window_size:
+            raise ValueError(
+                f"Insufficient context rows for CF window replacement on asset={context_item}: "
+                f"need {self.window_size}, got {len(item_indices)}"
+            )
+        target_indices = item_indices[-self.window_size:]
+        rating_col_pos = asset_base.columns.get_loc(DEFAULT_RATING_COL)
+
         preds = []
-        for idx in range(total):
-            # print(
-            #     f"Processing candidate window {idx + 1}/{total} "
-            #     f"(candidate_index={idx + 1}, asset={context_item})",
-            #     flush=True,
-            # )
-            ts_df = context_panel[context_panel[DEFAULT_ITEM_COL] == context_item].copy()
-            item_indices = ts_df.index.to_numpy()
-            if len(item_indices) < self.window_size:
-                raise ValueError(
-                    f"Insufficient context rows for CF window replacement on asset={context_item}: "
-                    f"need {self.window_size}, got {len(item_indices)}"
-                )
-            target_indices = item_indices[-self.window_size:]
-            ts_df.loc[target_indices, DEFAULT_RATING_COL] = arr[idx].astype(float)
+        for idx in range(arr.shape[0]):
+            ts_df = asset_base.copy()
+            ts_df.iloc[-self.window_size:, rating_col_pos] = arr[idx]
             preds.append(self._predict_from_ts_context(ts_df, context_item, context_timestamp, model_obj=model_obj))
         return np.asarray(preds, dtype=np.float64)
 
@@ -428,7 +427,7 @@ def _derive_data_paths(pkl_path: Path) -> tuple[Path, Path]:
     """Derive training and testing CSV paths from the pkl path using the naming convention.
 
     Convention: profitability_recommendation_pipeline_{date}_{model}.pkl
-             →  training_data_{date}_{model}.csv / testing_data_{date}_{model}.csv
+              training_data_{date}_{model}.csv / testing_data_{date}_{model}.csv
     """
     suffix = pkl_path.stem.replace("profitability_recommendation_pipeline_", "")
     parent = pkl_path.parent
@@ -596,8 +595,8 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
     def _run_query(q_idx, row_series):
         """Process one query. Returns (pred_rows, summary_rows, ts_dfs, was_skipped).
 
-        was_skipped=True  → insufficient data / context error (counted in skipped tally).
-        pred_rows=None    → CF generation ran but found nothing (not counted as skipped).
+        was_skipped=True  : insufficient data / context error (counted in skipped tally).
+        pred_rows=None    : CF generation ran but found nothing (not counted as skipped).
         """
         query_asset_id = row_series[DEFAULT_ITEM_COL]
         query_rec_time = pd.to_datetime(row_series[DEFAULT_TIMESTAMP_COL])
@@ -698,7 +697,7 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
             dice_train_query = dice_train_query.tail(max_reference_windows).copy()
 
         n_unique_windows = len(dice_train_query.drop_duplicates(subset=window_cols))
-        population_size = int(args.total_cfs) + 17
+        population_size = 10 * int(args.total_cfs)
         n_above_desired_min = (dice_train_query["prediction"] >= desired_min).sum()
         n_in_desired_range = (
             (dice_train_query["prediction"] >= desired_min) &
@@ -735,7 +734,7 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
                     flush=True,
                 )
                 return None, None, None, False
-            if n_unique_windows < population_size or n_above_desired_min < population_size:
+            if n_unique_windows < population_size:
                 print(
                     f"Skipping query-index {q_idx} | asset={query_asset_id}: "
                     f"insufficient reference windows for genetic search "
@@ -787,11 +786,11 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
             else:
                 raise
         except RuntimeError as error:
-            if "predict() call limit" in str(error):
+            if "DiCE search exceeded" in str(error):
                 elapsed = time.time() - t0
                 print(
                     f"Skipping query-index {q_idx} | asset={query_asset_id}: "
-                    f"predict() call limit ({MAX_PREDICT_CALLS}) exceeded — DiCE search aborted. "
+                    f"DiCE search exceeded {MAX_DICE_SECONDS}s time limit — aborted. "
                     f"elapsed={elapsed:.1f}s",
                     flush=True,
                 )
