@@ -55,6 +55,7 @@ class ProfitabilityPrediction(Algorithm):
         self.is_fitted = False
         self.save_for_testing = save_for_testing
         self.training_sizes_path = training_sizes_path
+        self._gpu_round_robin = 0
 
     def _model_tag(self):
         if isinstance(self.model, MLPKPIModel):
@@ -245,7 +246,17 @@ class ProfitabilityPrediction(Algorithm):
             if isinstance(self.model, INTERNAL_KPI_MODELS):
                 training_time_series = time_series_df[time_series_df[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]  # Internal-model train split over raw time-series (same temporal cutoff as KPI train rows)
                 train_targets = training_data[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]]
-                device = "cuda" if torch.cuda.is_available() else "cpu"
+                if torch.cuda.is_available():
+                    n_gpus = torch.cuda.device_count()
+                    if isinstance(self.model, TabNetKPIModel) and n_gpus > 1:
+                        # TabNet manages its network internally and doesn't support DataParallel;
+                        # round-robin across GPUs so both are used across training windows.
+                        device = f"cuda:{self._gpu_round_robin % n_gpus}"
+                        self._gpu_round_robin += 1
+                    else:
+                        device = "cuda"
+                else:
+                    device = "cpu"
                 artifact_prefix = os.path.join(
                     self._artifact_dir(),
                     f"kpis_train_{self._dataset_artifact_label(train_date)}_{self._model_tag()}_{self._model_param_tag()}",

@@ -224,6 +224,8 @@ class MLPKPIModel(nn.Module):
         # Move model to device
         self.device = device
         self.to(device)
+        if device != "cpu" and torch.cuda.device_count() > 1:
+            self.network = nn.DataParallel(self.network)
         
         # Create train/validation dataloaders
         dataset = torch.utils.data.TensorDataset(X, y)
@@ -318,7 +320,11 @@ class MLPKPIModel(nn.Module):
 
         if best_state is not None:
             self.network.load_state_dict(best_state)
-        
+
+        # Unwrap DataParallel so self.network is a plain nn.Sequential for serialization
+        if isinstance(self.network, nn.DataParallel):
+            self.network = self.network.module
+
         self.is_fitted = True
         self.eval()
 
