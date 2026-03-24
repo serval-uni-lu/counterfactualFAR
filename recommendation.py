@@ -627,9 +627,13 @@ if __name__ == "__main__":
     def_future_dates = []
     def_name = []
 
-    # 1 concurrent process so each window gets all CPUs (n_jobs=-1 in RFR).
-    # Raise for GPU models (mlp/tabnet) where CPU is not the bottleneck.
-    semaphore = Semaphore(1)
+    # GPU models (mlp/tabnet) run multiple windows in parallel across GPUs.
+    # RFR runs sequentially in the main process so n_jobs=-1 gets all CPUs without
+    # joblib's nested-parallelism cap that kicks in inside a subprocess.
+    import torch as _torch
+    _n_gpus = _torch.cuda.device_count() if _torch.cuda.is_available() else 0
+    _gpu_model = model in (MLP, TABNET)
+    semaphore = Semaphore(max(1, _n_gpus)) if _gpu_model else None
 
     # We first check the selected model is good.
     f_name = get_name(model, params)
@@ -683,18 +687,25 @@ if __name__ == "__main__":
         # Now, we choose metrics:
         print("Executing algorithm: " + model + " Start date: " + str(rec_date) + " End date: " + str(future_date))
         # Next: we get the algorithm and the parameters:
-        
-        def _run(sem, *args):
-            try:
-                regressor(*args)
-            finally:
-                sem.release()
 
-        semaphore.acquire()
-        proc = Process(target=_run, args=(semaphore, model, params, splitted_data, rec_date, metrics, directory,
-                                          alg_name, months_term, save_for_testing))
-        procs.append(proc)
-        proc.start()
+        if _gpu_model:
+            # MLP/TabNet: run windows in parallel subprocesses, one per GPU.
+            def _run(sem, *args):
+                try:
+                    regressor(*args)
+                finally:
+                    sem.release()
+
+            semaphore.acquire()
+            proc = Process(target=_run, args=(semaphore, model, params, splitted_data, rec_date, metrics, directory,
+                                              alg_name, months_term, save_for_testing))
+            procs.append(proc)
+            proc.start()
+        else:
+            # RFR: run directly in the main process so sklearn's n_jobs=-1 gets all
+            # CPUs without joblib's nested-parallelism cap inside a subprocess.
+            regressor(model, params, splitted_data, rec_date, metrics, directory, alg_name, months_term,
+                      save_for_testing)
 
     if len(procs) > 0:
         for proc in procs:
