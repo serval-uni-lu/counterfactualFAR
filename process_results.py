@@ -178,10 +178,10 @@ def _plot_single_asset_timeseries(df, asset_id, summary_path, query_index, out_d
         dates = [query_date - timedelta(days=(window_size - 1 - i)) for i in range(window_size)]
 
         fig, ax = plt.subplots(figsize=(8, 3))
-        ax.plot(dates, factual_prices, label="Factual", color="#0181cb", linewidth=2, marker="o", markersize=3)
+        ax.plot(dates, factual_prices, label="Factual", color="#0181cb", linewidth=2, marker="o", markersize=3, alpha=0.9)
         for cf_i, (_, cf_row) in enumerate(cf_rows.iterrows()):
             cf_prices = list(json.loads(cf_row["window_line"]).values())
-            ax.plot(dates, cf_prices, label=f"CF", color="#ffbc42", linewidth=1.5, marker="o", markersize=3)
+            ax.plot(dates, cf_prices, label=f"CF", color="#ffbc42", linewidth=1.5, marker="o", markersize=3, alpha=0.5)
 
         ax.set_title(f"Asset {asset_id} | query_index={q_idx} | query_date={query_date.date()}", fontsize=8)
         ax.set_xlabel("")
