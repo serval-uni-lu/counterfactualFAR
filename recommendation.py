@@ -627,7 +627,9 @@ if __name__ == "__main__":
     def_future_dates = []
     def_name = []
 
-    semaphore = Semaphore(4)
+    # 1 concurrent process so each window gets all CPUs (n_jobs=-1 in RFR).
+    # Raise for GPU models (mlp/tabnet) where CPU is not the bottleneck.
+    semaphore = Semaphore(1)
 
     # We first check the selected model is good.
     f_name = get_name(model, params)
@@ -682,8 +684,15 @@ if __name__ == "__main__":
         print("Executing algorithm: " + model + " Start date: " + str(rec_date) + " End date: " + str(future_date))
         # Next: we get the algorithm and the parameters:
         
-        proc = Process(target=regressor, args=(model, params, splitted_data, rec_date, metrics, directory, alg_name,
-                                            months_term, save_for_testing))
+        def _run(sem, *args):
+            try:
+                regressor(*args)
+            finally:
+                sem.release()
+
+        semaphore.acquire()
+        proc = Process(target=_run, args=(semaphore, model, params, splitted_data, rec_date, metrics, directory,
+                                          alg_name, months_term, save_for_testing))
         procs.append(proc)
         proc.start()
 
