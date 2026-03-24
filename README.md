@@ -94,7 +94,7 @@ python3 generate_rfr_counterfactuals_pkl.py
 Run a single window:
 ```
 python3 generate_rfr_counterfactuals_pkl.py \
-  --model-pkl artifacts_for_counterfactuals/rfr_n-100_kpi-full_short_internal_kpis/profitability_recommendation_pipeline_2021-11-23_00-00-00_rfr_n-100_kpi-full_short_internal_kpis.pkl
+  --model-pkl artifacts_for_counterfactuals/rfr_n-100_kpi-full_short_internal_kpis/profitability_recommendation_pipeline_2020-08-28_00-00-00_rfr_n-100_kpi-full_short_internal_kpis.pkl
 ```
 
 **Analyse counterfactuals**
