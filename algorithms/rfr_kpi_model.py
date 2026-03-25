@@ -195,5 +195,10 @@ class RFRKPIModel:
         if self.kpi_features is None:
             raise ValueError("kpi_features must be set (call fit() first)")
 
+        # _kpi_cache is only for training (set in fit(), consumed in transform()).
+        # Old pickles may have it non-None if the old transform() didn't clear it.
+        # Force-clear here so inference always calls _generate_kpis_df() fresh.
+        self.transformer._kpi_cache = None
+
         preds = self.pipeline.predict(time_series_df)
         return preds.reshape(-1, 1)

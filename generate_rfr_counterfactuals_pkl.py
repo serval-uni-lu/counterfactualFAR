@@ -336,7 +336,14 @@ class RFRPKLWindowWrapper:
         for idx in range(arr.shape[0]):
             ts_df = asset_base.copy()
             ts_df.iloc[-self.window_size:, rating_col_pos] = arr[idx]
-            preds.append(self._predict_from_ts_context(ts_df, context_item, context_timestamp, model_obj=model_obj))
+            try:
+                preds.append(self._predict_from_ts_context(ts_df, context_item, context_timestamp, model_obj=model_obj))
+            except ValueError:
+                # This CF candidate's window values (e.g. zero prices) caused degenerate
+                # KPI rows (div-by-zero in ROI/Sharpe → all NaN → dropna → 0 rows).
+                # Fall back to the factual score so DiCE treats it as "no improvement"
+                # and evolves away from it, rather than crashing the worker.
+                preds.append(self._predict_from_ts_context(asset_base.copy(), context_item, context_timestamp, model_obj=model_obj))
         return np.asarray(preds, dtype=np.float64)
 
 
