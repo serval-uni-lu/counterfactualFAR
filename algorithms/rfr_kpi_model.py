@@ -22,6 +22,7 @@ class KPIFeatureTransformer(BaseEstimator, TransformerMixin):
         self.kpi_generator = MAKPIGenerator(data=None, k=k, kpi_type=kpi_type)
         self._fit_keys = None
         self.last_kpis_df_ = None
+        self._kpi_cache = None  # set by RFRKPIModel.fit() to avoid recomputing in transform()
 
     def _generate_kpis_df(self, time_series_df):
         self.kpi_generator.data = time_series_df
@@ -50,7 +51,11 @@ class KPIFeatureTransformer(BaseEstimator, TransformerMixin):
         if self.kpi_features is None:
             raise ValueError("kpi_features must be set before generating KPIs")
 
-        kpis_df = self._generate_kpis_df(X)
+        if self._kpi_cache is not None:
+            kpis_df = self._kpi_cache
+            self._kpi_cache = None  # consume once, recompute on any subsequent call
+        else:
+            kpis_df = self._generate_kpis_df(X)
         self.last_kpis_df_ = kpis_df.copy()
 
         missing = [col for col in self.kpi_features if col not in kpis_df.columns]
@@ -129,6 +134,8 @@ class RFRKPIModel:
         self.transformer.kpi_features = kpi_features
 
         kpis_df = self._generate_kpis_df(time_series_df)
+        # Cache so pipeline.fit() → transform() reuses this result instead of recomputing.
+        self.transformer._kpi_cache = kpis_df
         if artifact_label is not None:
             os.makedirs(os.path.dirname(artifact_label), exist_ok=True)
             if isinstance(y, pd.DataFrame):

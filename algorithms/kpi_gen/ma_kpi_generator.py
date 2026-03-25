@@ -52,7 +52,9 @@ class MAKPIGenerator(KPIGenerator):
         timea = datetime.datetime.now()
         asset_groups = [grp for _, grp in self.data.groupby(DEFAULT_ITEM_COL, sort=False)]
 
-        asset_dfs = Parallel(n_jobs=-1)(
+        # prefer='threads': pandas rolling ops release the GIL so threads parallelise
+        # without the serialisation overhead of spawning loky worker processes.
+        asset_dfs = Parallel(n_jobs=-1, prefer='threads')(
             delayed(_compute_asset_kpis)(grp, self.k, self.kpi_type)
             for grp in asset_groups
         )
