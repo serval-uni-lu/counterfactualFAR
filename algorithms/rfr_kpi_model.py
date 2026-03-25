@@ -16,6 +16,7 @@ class KPIFeatureTransformer(BaseEstimator, TransformerMixin):
     """
 
     _kpi_cache = None  # class-level default for backward compat with pickles created before this attr existed
+    _fit_keys = None   # class-level default for backward compat with pickles where _fit_keys was not cleared
 
     def __init__(self, k=5, kpi_type="full_short", kpi_features=None):
         self.k = k
