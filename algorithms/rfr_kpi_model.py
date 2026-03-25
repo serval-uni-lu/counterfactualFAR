@@ -72,7 +72,10 @@ class KPIFeatureTransformer(BaseEstimator, TransformerMixin):
                 how="inner",
             )
             self._fit_keys = None
-            return merged[self.kpi_features].values.astype(np.float32)
+            if not merged.empty:
+                return merged[self.kpi_features].values.astype(np.float32)
+            # merged is empty: _fit_keys was stale (old pickle with training keys);
+            # fall through to return the full kpis_df instead.
 
         return kpis_df[self.kpi_features].values.astype(np.float32)
 
