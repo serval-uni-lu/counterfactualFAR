@@ -200,16 +200,17 @@ class ProfitabilityPrediction(Algorithm):
         if source_kpis is None:
             raise ValueError("KPI data is missing and the selected model does not generate KPIs internally")
 
-        kpi_indicators = source_kpis[source_kpis[DEFAULT_ITEM_COL].isin(self.data.assets)]
-        # For each asset, we get the target (profitability at k months)
-        asset_dfs = []
-        for asset in kpi_indicators[DEFAULT_ITEM_COL].unique():
-            asset_df = kpi_indicators[kpi_indicators[DEFAULT_ITEM_COL] == asset].copy()
-            asset_df["final_price"] = asset_df[DEFAULT_RATING_COL].shift(-self.months * 21)
-            asset_df["target"] = (asset_df["final_price"] - asset_df[DEFAULT_RATING_COL]) / (asset_df[DEFAULT_RATING_COL])
-            asset_df = asset_df[asset_df[DEFAULT_RATING_COL] > 0.0]
-            asset_dfs.append(asset_df)
-        kpi_indicators = pd.concat(asset_dfs)
+        kpi_indicators = source_kpis[source_kpis[DEFAULT_ITEM_COL].isin(self.data.assets)].copy()
+        # For each asset, compute the target (profitability at k months) — vectorised groupby
+        kpi_indicators["final_price"] = (
+            kpi_indicators.groupby(DEFAULT_ITEM_COL, sort=False)[DEFAULT_RATING_COL]
+            .shift(-self.months * 21)
+        )
+        kpi_indicators["target"] = (
+            (kpi_indicators["final_price"] - kpi_indicators[DEFAULT_RATING_COL])
+            / kpi_indicators[DEFAULT_RATING_COL]
+        )
+        kpi_indicators = kpi_indicators[kpi_indicators[DEFAULT_RATING_COL] > 0.0]
 
         # Finally, we filter the indicators by date.
         full = kpi_indicators.copy()
