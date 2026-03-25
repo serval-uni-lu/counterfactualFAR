@@ -265,12 +265,12 @@ class RFRPKLWindowWrapper:
             if selected.empty:
                 fallback = kpis_df[kpis_df[DEFAULT_ITEM_COL] == context_item].tail(1)
                 if not fallback.empty and not self._kpi_fallback_warned:
-                    fallback_ts = fallback.iloc[0][DEFAULT_TIMESTAMP_COL]
-                    print(
-                        f"WARNING: KPI row for ({context_item}, {context_timestamp}) not found. "
-                        f"Scoring via most recent KPI row at {fallback_ts} for all candidates in this query.",
-                        flush=True,
-                    )
+                    # fallback_ts = fallback.iloc[0][DEFAULT_TIMESTAMP_COL]
+                    # print(
+                    #     f"WARNING: KPI row for ({context_item}, {context_timestamp}) not found. "
+                    #     f"Scoring via most recent KPI row at {fallback_ts} for all candidates in this query.",
+                    #     flush=True,
+                    # )
                     self._kpi_fallback_warned = True
                 selected = fallback
         else:
@@ -474,7 +474,7 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
 
     window_size = FIXED_WINDOW_SIZE
     window_cols = [f"w_{i}" for i in range(window_size)]
-    print(f"Using fixed window-size={window_size}")
+    # print(f"Using fixed window-size={window_size}")
 
     full_history = pd.concat([training_ts, testing_ts], ignore_index=True)
     full_history = full_history.drop_duplicates(subset=[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, DEFAULT_RATING_COL])
@@ -680,11 +680,11 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
             & (reference_windows[DEFAULT_TIMESTAMP_COL] < query_rec_time)
         ].copy()
         if dice_train_query.empty:
-            print(
-                f"WARNING: No historical windows for asset={query_asset_id} before {query_rec_time}. "
-                "Falling back to all-asset reference windows. CFs may reflect another asset's price scale.",
-                flush=True,
-            )
+            # print(
+            #     f"WARNING: No historical windows for asset={query_asset_id} before {query_rec_time}. "
+            #     "Falling back to all-asset reference windows. CFs may reflect another asset's price scale.",
+            #     flush=True,
+            # )
             dice_train_query = reference_windows[
                 reference_windows[DEFAULT_TIMESTAMP_COL] < query_rec_time
             ].copy()
