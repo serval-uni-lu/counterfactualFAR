@@ -323,6 +323,9 @@ class RFRPKLWindowWrapper:
 
         # Filter and validate once outside the loop — asset rows are identical for all candidates.
         asset_base = context_panel[context_panel[DEFAULT_ITEM_COL] == context_item]
+        # KPI rolling windows need at most min_history_len rows — truncate to avoid O(N) slowdown
+        # at high query indices where full history can be thousands of rows.
+        asset_base = asset_base.iloc[-self.min_history_len:].reset_index(drop=True)
         item_indices = asset_base.index.to_numpy()
         if len(item_indices) < self.window_size:
             raise ValueError(
