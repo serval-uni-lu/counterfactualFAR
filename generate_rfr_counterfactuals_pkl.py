@@ -322,10 +322,12 @@ class RFRPKLWindowWrapper:
         model_obj = self._get_thread_model()
 
         # Filter and validate once outside the loop — asset rows are identical for all candidates.
-        asset_base = context_panel[context_panel[DEFAULT_ITEM_COL] == context_item]
-        # KPI rolling windows need at most min_history_len rows — truncate to avoid O(N) slowdown
-        # at high query indices where full history can be thousands of rows.
-        asset_base = asset_base.iloc[-self.min_history_len:].reset_index(drop=True)
+        asset_base_full = context_panel[context_panel[DEFAULT_ITEM_COL] == context_item]
+        # Truncated version for CF candidate scoring: KPI rolling windows only need
+        # min_history_len rows, so capping here avoids O(N) slowdown at high query indices.
+        # The full series is kept for the factual fallback, which needs enough history to
+        # produce valid KPIs even when recent prices are flat (std=0 → Sharpe NaN).
+        asset_base = asset_base_full.iloc[-self.min_history_len:].reset_index(drop=True)
         item_indices = asset_base.index.to_numpy()
         if len(item_indices) < self.window_size:
             raise ValueError(
@@ -344,9 +346,9 @@ class RFRPKLWindowWrapper:
             except ValueError:
                 # This CF candidate's window values (e.g. zero prices) caused degenerate
                 # KPI rows (div-by-zero in ROI/Sharpe → all NaN → dropna → 0 rows).
-                # Fall back to the factual score so DiCE treats it as "no improvement"
-                # and evolves away from it, rather than crashing the worker.
-                preds.append(self._predict_from_ts_context(asset_base.copy(), context_item, context_timestamp, model_obj=model_obj))
+                # Fall back to the factual score using the full (un-truncated) series so
+                # that assets with flat recent prices still produce valid KPI rows.
+                preds.append(self._predict_from_ts_context(asset_base_full.copy(), context_item, context_timestamp, model_obj=model_obj))
         return np.asarray(preds, dtype=np.float64)
 
 
@@ -896,7 +898,7 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
         q_idx = int(query_row["query_index_original"])
         if args.query_index is not None and q_idx < int(args.query_index):
             continue
-        if args.query_index is None and q_idx in done_query_indices:
+        if q_idx in done_query_indices:
             print(f"Skipping query-index {q_idx} (already processed)", flush=True)
             continue
         queries_to_run.append((q_idx, query_row))
