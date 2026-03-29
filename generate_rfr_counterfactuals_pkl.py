@@ -893,10 +893,19 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
     # ------------------------------------------------------------------ #
     # Build the list of queries to process (after resume/skip filtering). #
     # ------------------------------------------------------------------ #
+    # When resuming, skip all queries below the highest already-processed index for
+    # this run's scope. This avoids re-running queries that were attempted but produced
+    # no CFs (and therefore have no rows in done_query_indices).
+    this_run_indices = set(query_windows["query_index_original"].astype(int))
+    done_this_run = done_query_indices & this_run_indices
+    resume_floor = max(done_this_run) if done_this_run and getattr(args, "resume", False) else -1
+
     queries_to_run = []
     for _, query_row in query_windows.iterrows():
         q_idx = int(query_row["query_index_original"])
         if args.query_index is not None and q_idx < int(args.query_index):
+            continue
+        if q_idx < resume_floor:
             continue
         if q_idx in done_query_indices:
             print(f"Skipping query-index {q_idx} (already processed)", flush=True)
