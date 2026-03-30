@@ -592,6 +592,14 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
 
     write_lock = Lock()
 
+    def _write_no_cf_sentinel(q_idx, row_series):
+        """Write a sentinel row so --resume skips this query next time (DiCE found no CFs)."""
+        pd.DataFrame(
+            [[q_idx, row_series[DEFAULT_ITEM_COL], row_series[DEFAULT_TIMESTAMP_COL],
+              None, "no_cf", None]],
+            columns=window_columns,
+        ).to_csv(out_summary, mode="a", header=False, index=False)
+
     def _write_results(pred_rows, summary_rows, ts_dfs):
         """Append one query's results to all three output files (call under write_lock)."""
         for row in pred_rows:
@@ -923,16 +931,18 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
                 skipped_indices.append(q_idx)
             elif pred_rows is not None:
                 _write_results(pred_rows, summary_rows, ts_dfs)
+            else:
+                _write_no_cf_sentinel(q_idx, row_series)
     else:
         # Parallel path — each worker thread holds its own model copy and query context
         # via thread-local storage; file writes are serialised with write_lock.
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            future_to_qidx = {
-                executor.submit(_run_query, q_idx, row_series): q_idx
+            future_to_query = {
+                executor.submit(_run_query, q_idx, row_series): (q_idx, row_series)
                 for q_idx, row_series in queries_to_run
             }
-            for future in as_completed(future_to_qidx):
-                q_idx_done = future_to_qidx[future]
+            for future in as_completed(future_to_query):
+                q_idx_done, row_series_done = future_to_query[future]
                 try:
                     pred_rows, summary_rows, ts_dfs, was_skipped = future.result()
                 except Exception as exc:
@@ -944,6 +954,9 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
                 elif pred_rows is not None:
                     with write_lock:
                         _write_results(pred_rows, summary_rows, ts_dfs)
+                else:
+                    with write_lock:
+                        _write_no_cf_sentinel(q_idx_done, row_series_done)
 
     n_total = len(query_windows)
     n_skipped = len(skipped_indices)
