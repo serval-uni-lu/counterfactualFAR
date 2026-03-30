@@ -899,6 +899,7 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
     this_run_indices = set(query_windows["query_index_original"].astype(int))
     done_this_run = done_query_indices & this_run_indices
     resume_floor = max(done_this_run) if done_this_run and getattr(args, "resume", False) else -1
+    print(f"Resume floor: {resume_floor} | done_query_indices={len(done_query_indices)} | this_run={len(this_run_indices)} | overlap={len(done_this_run)}", flush=True)
 
     queries_to_run = []
     for _, query_row in query_windows.iterrows():
