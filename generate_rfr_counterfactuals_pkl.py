@@ -965,6 +965,14 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
     print(f"Saved summary         : {out_summary}")
     print(f"Saved timeseries      : {out_timeseries}")
 
+    # Progress across the full testing dataset (all assets, this PKL)
+    try:
+        total_queries_in_testing = len(pd.read_csv(testing_path, usecols=[DEFAULT_ITEM_COL]))
+        done_count = out_summary.exists() and pd.read_csv(out_summary, usecols=["query_index"])["query_index"].nunique() or 0
+        print(f"Overall progress      : {done_count}/{total_queries_in_testing} queries processed ({100*done_count/total_queries_in_testing:.1f}%)")
+    except Exception:
+        pass
+
 
 def main():
     parser = argparse.ArgumentParser(
