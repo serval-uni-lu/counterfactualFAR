@@ -814,7 +814,7 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
                     f"elapsed={elapsed:.1f}s",
                     flush=True,
                 )
-                return None, None, None, False
+                return None, None, None, True  # was_skipped=True: no sentinel, will retry
             raise
         except UserConfigValidationException as error:
             msg = str(error)
