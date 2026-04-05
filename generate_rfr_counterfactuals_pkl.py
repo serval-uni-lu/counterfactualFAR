@@ -633,7 +633,7 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
             wrapper.set_query_context(query_asset_id, query_rec_time)
         except ValueError as e:
             print(f"Skipping query-index {q_idx}: {e}", flush=True)
-            return None, None, None, True
+            return None, None, None, False  # permanent failure: write no_cf sentinel
 
         window_timestamps = wrapper._context_series.tail(window_size)[DEFAULT_TIMESTAMP_COL].values
 
