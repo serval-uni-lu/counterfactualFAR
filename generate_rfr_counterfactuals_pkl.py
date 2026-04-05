@@ -326,7 +326,7 @@ class RFRPKLWindowWrapper:
         # Truncated version for CF candidate scoring: KPI rolling windows only need
         # min_history_len rows, so capping here avoids O(N) slowdown at high query indices.
         # The full series is kept for the factual fallback, which needs enough history to
-        # produce valid KPIs even when recent prices are flat (std=0 → Sharpe NaN).
+        # produce valid KPIs even when recent prices are flat (std=0: Sharpe NaN).
         asset_base = asset_base_full.iloc[-self.min_history_len:].reset_index(drop=True)
         item_indices = asset_base.index.to_numpy()
         if len(item_indices) < self.window_size:
@@ -345,10 +345,11 @@ class RFRPKLWindowWrapper:
                 preds.append(self._predict_from_ts_context(ts_df, context_item, context_timestamp, model_obj=model_obj))
             except ValueError:
                 # This CF candidate's window values (e.g. zero prices) caused degenerate
-                # KPI rows (div-by-zero in ROI/Sharpe → all NaN → dropna → 0 rows).
-                # Fall back to the factual score using the full (un-truncated) series so
-                # that assets with flat recent prices still produce valid KPI rows.
-                preds.append(self._predict_from_ts_context(asset_base_full.copy(), context_item, context_timestamp, model_obj=model_obj))
+                # KPI rows (div-by-zero in ROI/Sharpe -> all NaN -> dropna -> 0 rows).
+                # Return 0.0 so DiCE can distinguish this bad candidate from the factual
+                # and evolve away from it. Returning factual_pred here would make all
+                # failed candidates look identical (flat fitness landscape -> no gradient).
+                preds.append(0.0)
         return np.asarray(preds, dtype=np.float64)
 
 
@@ -693,7 +694,7 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
                 f"factual score ({factual_pred:.6f}) already at or above reference max ({desired_max:.6f}); no room for improvement.",
                 flush=True,
             )
-            return None, None, None, True
+            return None, None, None, False  # permanent: write no_cf sentinel
 
         dice_train_query = reference_windows[
             (reference_windows[DEFAULT_ITEM_COL] == query_asset_id)
