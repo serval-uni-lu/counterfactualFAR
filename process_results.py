@@ -205,7 +205,7 @@ def _plot_timeseries_all_assets(details_files, out_dir, artifacts_dir=None):
         exp_tag = re.search(r"\d{4}-\d{2}-\d{2}", os.path.basename(path))
         exp_tag = exp_tag.group(0) if exp_tag else "unknown"
         cf_df = pd.read_csv(path)
-        cf_df["col_timestamp"] = pd.to_datetime(cf_df["col_timestamp"])
+        cf_df["col_timestamp"] = pd.to_datetime(cf_df["col_timestamp"], format="mixed")
 
         # Load full testing time series for all factual points
         testing_df = None
@@ -224,7 +224,12 @@ def _plot_timeseries_all_assets(details_files, out_dir, artifacts_dir=None):
         asset_out_dir = os.path.join(out_dir, f"cf_timeseries_{exp_tag}")
         os.makedirs(asset_out_dir, exist_ok=True)
 
+        n_saved = 0
         for page_i, page_start in enumerate(range(0, len(assets), assets_per_page)):
+            out_path = os.path.join(asset_out_dir, f"page_{page_i + 1:03d}.png")
+            if os.path.exists(out_path):
+                continue
+
             page_assets = assets[page_start: page_start + assets_per_page]
             fig, axes = plt.subplots(len(page_assets), 1, figsize=(14, 4 * len(page_assets)), squeeze=False)
 
@@ -267,12 +272,87 @@ def _plot_timeseries_all_assets(details_files, out_dir, artifacts_dir=None):
                 ax.grid(axis="y", linestyle="--", alpha=0.3)
 
             fig.tight_layout()
-            out_path = os.path.join(asset_out_dir, f"page_{page_i + 1:03d}.png")
             fig.savefig(out_path, dpi=150)
             plt.close(fig)
+            n_saved += 1
 
         n_pages = -(-len(assets) // assets_per_page)
-        print(f"Saved {n_pages} page(s) ({len(assets)} assets) to: {asset_out_dir}")
+        print(f"Saved {n_saved}/{n_pages} page(s) ({len(assets)} assets) to: {asset_out_dir}")
+
+
+def _plot_price_timeseries_all_assets(details_files, out_dir, artifacts_dir=None):
+    """For each experiment, plot full train+test price series per asset, 5 per page.
+
+    Asset order matches the CF timeseries plots (order of first appearance in cf_details).
+    Train and test segments are shown in different colours with a vertical separator.
+    Output folder: out_dir/../prices/price_timeseries_{exp_tag}/
+    """
+    prices_root = os.path.join(os.path.dirname(out_dir), "prices")
+
+    for path in details_files:
+        exp_tag = re.search(r"\d{4}-\d{2}-\d{2}", os.path.basename(path))
+        exp_tag = exp_tag.group(0) if exp_tag else "unknown"
+
+        cf_df = pd.read_csv(path)
+        assets = list(cf_df["col_item"].unique())  # same order as CF plots
+
+        if not artifacts_dir:
+            print(f"Skipping price plots for {exp_tag}: no artifacts_dir provided")
+            continue
+
+        train_files = glob.glob(os.path.join(artifacts_dir, f"training_data_{exp_tag}_*.csv"))
+        test_files  = glob.glob(os.path.join(artifacts_dir, f"testing_data_{exp_tag}_*.csv"))
+        if not train_files or not test_files:
+            print(f"Skipping price plots for {exp_tag}: training/testing CSVs not found")
+            continue
+
+        train_df = pd.read_csv(train_files[0])
+        test_df  = pd.read_csv(test_files[0])
+        train_df["col_timestamp"] = pd.to_datetime(train_df["col_timestamp"])
+        test_df["col_timestamp"]  = pd.to_datetime(test_df["col_timestamp"])
+
+        asset_out_dir = os.path.join(prices_root, f"price_timeseries_{exp_tag}")
+        os.makedirs(asset_out_dir, exist_ok=True)
+
+        assets_per_page = 5
+        n_saved = 0
+        for page_i, page_start in enumerate(range(0, len(assets), assets_per_page)):
+            out_path = os.path.join(asset_out_dir, f"page_{page_i + 1:03d}.png")
+            if os.path.exists(out_path):
+                continue
+
+            page_assets = assets[page_start: page_start + assets_per_page]
+            fig, axes = plt.subplots(len(page_assets), 1, figsize=(14, 4 * len(page_assets)), squeeze=False)
+
+            for ax, asset in zip(axes[:, 0], page_assets):
+                tr = train_df[train_df["col_item"] == asset].sort_values("col_timestamp")
+                te = test_df[test_df["col_item"] == asset].sort_values("col_timestamp")
+
+                if not tr.empty:
+                    ax.plot(tr["col_timestamp"], tr["col_rating"],
+                            color="#0181cb", linewidth=1.2, label="Train")
+                if not te.empty:
+                    ax.plot(te["col_timestamp"], te["col_rating"],
+                            color="#ff6b35", linewidth=1.2, label="Test")
+
+                if not tr.empty and not te.empty:
+                    split_date = tr["col_timestamp"].max()
+                    ax.axvline(split_date, color="grey", linewidth=0.8, linestyle="--")
+
+                ax.set_title(f"{asset} | {exp_tag}", fontsize=8)
+                ax.set_ylabel("Price", fontsize=7)
+                ax.legend(fontsize=7)
+                ax.tick_params(axis="x", rotation=30, labelsize=6)
+                ax.tick_params(axis="y", labelsize=7)
+                ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+            fig.tight_layout()
+            fig.savefig(out_path, dpi=150)
+            plt.close(fig)
+            n_saved += 1
+
+        n_pages = -(-len(assets) // assets_per_page)
+        print(f"Saved {n_saved}/{n_pages} price page(s) ({len(assets)} assets) to: {asset_out_dir}")
 
 
 def _plot_all_assets_summary(details_files, out_dir):
@@ -303,31 +383,122 @@ def _plot_all_assets_summary(details_files, out_dir):
         for i in range(len(all_metrics), n_rows * n_cols):
             axes[i // n_cols, i % n_cols].set_visible(False)
 
-        fig.suptitle(f"CF metrics — all assets | {exp_tag}", fontsize=13)
-        fig.tight_layout()
-        out_path = os.path.join(out_dir, f"cf_summary_{exp_tag}.png")
-        fig.savefig(out_path, dpi=150)
+        summary_path = os.path.join(out_dir, f"cf_summary_{exp_tag}.png")
+        if os.path.exists(summary_path):
+            print(f"Skipping (exists): {summary_path}")
+        else:
+            fig.suptitle(f"CF metrics — all assets | {exp_tag}", fontsize=13)
+            fig.tight_layout()
+            fig.savefig(summary_path, dpi=150)
+            print(f"Saved: {summary_path}")
         plt.close(fig)
-        print(f"Saved: {out_path}")
 
         # Scatter: factual vs CF prediction
-        fig, ax = plt.subplots(figsize=(6, 6))
-        ax.scatter(df["factual_prediction"], df["cf_prediction"], alpha=0.4, s=10)
-        lims = [df[["factual_prediction", "cf_prediction"]].min().min(),
-                df[["factual_prediction", "cf_prediction"]].max().max()]
-        ax.plot(lims, lims, "k--", linewidth=1)
-        ax.set_xlabel("Factual prediction")
-        ax.set_ylabel("CF prediction")
-        ax.set_title(f"Factual vs CF prediction | {exp_tag}")
-        ax.grid(linestyle="--", alpha=0.3)
-        fig.tight_layout()
-        out_path = os.path.join(out_dir, f"cf_scatter_{exp_tag}.png")
-        fig.savefig(out_path, dpi=150)
-        plt.close(fig)
-        print(f"Saved: {out_path}")
+        scatter_path = os.path.join(out_dir, f"cf_scatter_{exp_tag}.png")
+        if os.path.exists(scatter_path):
+            print(f"Skipping (exists): {scatter_path}")
+        else:
+            fig, ax = plt.subplots(figsize=(6, 6))
+            ax.scatter(df["factual_prediction"], df["cf_prediction"], alpha=0.4, s=10)
+            lims = [df[["factual_prediction", "cf_prediction"]].min().min(),
+                    df[["factual_prediction", "cf_prediction"]].max().max()]
+            ax.plot(lims, lims, "k--", linewidth=1)
+            ax.set_xlabel("Factual prediction")
+            ax.set_ylabel("CF prediction")
+            ax.set_title(f"Factual vs CF prediction | {exp_tag}")
+            ax.grid(linestyle="--", alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(scatter_path, dpi=150)
+            plt.close(fig)
+            print(f"Saved: {scatter_path}")
+
+
+def fill_no_cf_rows(cf_dir: str, artifacts_dir: str | None = None) -> None:
+    """Add no_cf placeholder rows from summary into cf_details and cf_timeseries.
+
+    Rows are matched by query_index — already-present indices are not duplicated.
+    factual_rating / col_rating are populated from the testing data when artifacts_dir
+    is provided; all CF metric columns are left as NaN.
+    """
+    for summary_path in sorted(glob.glob(os.path.join(cf_dir, "summary_*.csv"))):
+        exp_tag = re.search(r"\d{4}-\d{2}-\d{2}", os.path.basename(summary_path))
+        if not exp_tag:
+            continue
+        exp_tag = exp_tag.group(0)
+
+        summary = pd.read_csv(summary_path)
+        no_cf = summary[summary["row_type"] == "no_cf"][
+            ["query_index", "col_item", "col_timestamp"]
+        ].drop_duplicates("query_index").copy()
+        if no_cf.empty:
+            continue
+
+        # Look up factual rating from testing data if available
+        factual_rating: dict[int, float] = {}
+        if artifacts_dir:
+            test_files = glob.glob(
+                os.path.join(artifacts_dir, f"testing_data_{exp_tag}_*.csv")
+            )
+            if test_files:
+                testing = pd.read_csv(test_files[0])
+                testing["col_timestamp"] = pd.to_datetime(testing["col_timestamp"])
+                no_cf["col_timestamp"] = pd.to_datetime(no_cf["col_timestamp"])
+                for _, row in no_cf.iterrows():
+                    mask = (
+                        (testing["col_item"] == row["col_item"]) &
+                        (testing["col_timestamp"] == row["col_timestamp"])
+                    )
+                    matches = testing.loc[mask, "col_rating"]
+                    if not matches.empty:
+                        factual_rating[int(row["query_index"])] = float(matches.iloc[0])
+
+        for details_path in sorted(glob.glob(os.path.join(cf_dir, f"cf_details_*{exp_tag}*.csv"))):
+            df = pd.read_csv(details_path)
+            new = no_cf[~no_cf["query_index"].isin(df["query_index"])].copy()
+            if new.empty:
+                continue
+            for col in df.columns:
+                if col not in new.columns:
+                    new[col] = float("nan")
+            if "factual_rating" in new.columns:
+                new["factual_rating"] = new["query_index"].map(factual_rating)
+            df = pd.concat([df, new[df.columns]], ignore_index=True)
+            df = df.sort_values("query_index").reset_index(drop=True)
+            df.to_csv(details_path, index=False)
+            print(f"fill_no_cf: added {len(new)} rows to {os.path.basename(details_path)}")
+
+        for ts_path in sorted(glob.glob(os.path.join(cf_dir, f"cf_timeseries_*{exp_tag}*.csv"))):
+            df = pd.read_csv(ts_path)
+            new = no_cf[~no_cf["query_index"].isin(df["query_index"])].copy()
+            if new.empty:
+                continue
+            for col in df.columns:
+                if col not in new.columns:
+                    new[col] = float("nan")
+            if "col_rating" in new.columns:
+                new["col_rating"] = new["query_index"].map(factual_rating)
+            df = pd.concat([df, new[df.columns]], ignore_index=True)
+            df = df.sort_values("query_index").reset_index(drop=True)
+            df.to_csv(ts_path, index=False)
+            print(f"fill_no_cf: added {len(new)} rows to {os.path.basename(ts_path)}")
+
+
+def sort_cf_outputs(cf_dir: str) -> None:
+    """Sort all CF output CSVs by query_index in place."""
+    patterns = ["cf_details_*.csv", "summary_*.csv", "cf_timeseries_*.csv"]
+    for pattern in patterns:
+        for path in sorted(glob.glob(os.path.join(cf_dir, pattern))):
+            df = pd.read_csv(path)
+            if "query_index" not in df.columns:
+                print(f"Skipping {os.path.basename(path)}: no query_index column")
+                continue
+            df = df.sort_values("query_index").reset_index(drop=True)
+            df.to_csv(path, index=False)
+            print(f"Sorted and saved: {path} ({len(df)} rows)")
 
 
 def plot_cf_analysis(cf_dir: str, asset_id: str | None, query_index: int | None, out_dir: str, args=None) -> None:
+    fill_no_cf_rows(cf_dir, artifacts_dir=args.artifacts_dir if args else None)
     details_files = sorted(glob.glob(os.path.join(cf_dir, "cf_details_*.csv")))
     summary_files = sorted(glob.glob(os.path.join(cf_dir, "summary_*.csv")))
     os.makedirs(out_dir, exist_ok=True)
@@ -343,6 +514,7 @@ def plot_cf_analysis(cf_dir: str, asset_id: str | None, query_index: int | None,
             print(f"[{exp_tag}] Found {df['query_index'].nunique()} queries across {df['col_item'].nunique()} assets")
         _plot_all_assets_summary(details_files, out_dir)
         _plot_timeseries_all_assets(details_files, out_dir, artifacts_dir=args.artifacts_dir)
+        _plot_price_timeseries_all_assets(details_files, out_dir, artifacts_dir=args.artifacts_dir)
     else:
         # Per-asset window plot — asset-id and query-index must be specified
         if query_index is None:
@@ -370,10 +542,14 @@ def main():
     cf_parser.add_argument("--cf-dir", default=os.path.join(CF_ROOT, _MODEL_TAG), help="Directory with CF output files")
     cf_parser.add_argument("--out-dir", default=os.path.join(STATS_DIR, "plots", "cf"), help="Output directory for plots")
     cf_parser.add_argument("--artifacts-dir", default=os.path.join("artifacts_for_counterfactuals", _MODEL_TAG), help="Artifacts directory containing testing_data_*.csv files")
+    cf_parser.add_argument("--sort", action="store_true", help="Sort CF output CSVs by query_index and save in place (no plots)")
 
     args = parser.parse_args()
 
     if args.mode == "cf":
+        if args.sort:
+            sort_cf_outputs(args.cf_dir)
+            return
         plot_cf_analysis(args.cf_dir, args.asset_id, args.query_index, args.out_dir, args=args)
         return
 
