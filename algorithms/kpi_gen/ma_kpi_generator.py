@@ -60,7 +60,7 @@ class MAKPIGenerator(KPIGenerator):
         )
 
         time_elapsed = datetime.datetime.now() - timea
-        print(f"Generated indicators for {len(asset_dfs)} assets ({time_elapsed})")
+        # print(f"Generated indicators for {len(asset_dfs)} assets ({time_elapsed})")
 
         full_df = pd.concat(asset_dfs)
         self.kpis = full_df
