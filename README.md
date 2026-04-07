@@ -99,6 +99,11 @@ python3 generate_rfr_counterfactuals_pkl.py \
 
 **Analyse counterfactuals**
 
+First, sort each CF file by query_index, and overwrites them in place
+```
+python3 process_results.py cf --sort
+```
+
 Aggregate comparison across all assets (metric distributions + factual vs CF scatter):
 ```
 python3 process_results.py cf
