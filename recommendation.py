@@ -324,16 +324,19 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
                 kpi_features=feats,
                 random_state=42,
                 max_features="sqrt",
-                min_samples_leaf=10,
+                min_samples_leaf=5,
                 max_depth=20,
+                max_samples=0.8,
                 n_jobs=-1,
             )
         else:
             alg_model = RandomForestRegressor(
                 n_estimators=n,
+                criterion="squared_error",
                 max_features="sqrt",
-                min_samples_leaf=10,
+                min_samples_leaf=5,
                 max_depth=20,
+                max_samples=0.8,
                 n_jobs=-1,
                 random_state=42,
             )
