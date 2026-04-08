@@ -593,11 +593,11 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
 
     write_lock = Lock()
 
-    def _write_no_cf_sentinel(q_idx, row_series):
-        """Write a sentinel row so --resume skips this query next time (DiCE found no CFs)."""
+    def _write_no_cf_sentinel(q_idx, row_series, row_type="no_cf"):
+        """Write a sentinel row so --resume skips this query next time."""
         pd.DataFrame(
             [[q_idx, row_series[DEFAULT_ITEM_COL], row_series[DEFAULT_TIMESTAMP_COL],
-              None, "no_cf", None]],
+              None, row_type, None]],
             columns=window_columns,
         ).to_csv(out_summary, mode="a", header=False, index=False)
 
@@ -930,6 +930,7 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
             pred_rows, summary_rows, ts_dfs, was_skipped = _run_query(q_idx, row_series)
             if was_skipped:
                 skipped_indices.append(q_idx)
+                _write_no_cf_sentinel(q_idx, row_series, row_type="skipped")
             elif pred_rows is not None:
                 _write_results(pred_rows, summary_rows, ts_dfs)
             else:
@@ -949,9 +950,13 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
                 except Exception as exc:
                     print(f"Query {q_idx_done} raised an exception: {exc}", flush=True)
                     skipped_indices.append(q_idx_done)
+                    with write_lock:
+                        _write_no_cf_sentinel(q_idx_done, row_series_done, row_type="skipped")
                     continue
                 if was_skipped:
                     skipped_indices.append(q_idx_done)
+                    with write_lock:
+                        _write_no_cf_sentinel(q_idx_done, row_series_done, row_type="skipped")
                 elif pred_rows is not None:
                     with write_lock:
                         _write_results(pred_rows, summary_rows, ts_dfs)
