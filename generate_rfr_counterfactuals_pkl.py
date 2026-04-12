@@ -815,7 +815,7 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
                     f"elapsed={elapsed:.1f}s",
                     flush=True,
                 )
-                return None, None, None, True  # was_skipped=True: no sentinel, will retry
+                return None, None, None, True  # was_skipped=True: caller writes "skipped" sentinel
             raise
         except UserConfigValidationException as error:
             msg = str(error)
@@ -902,20 +902,22 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
     # ------------------------------------------------------------------ #
     # Build the list of queries to process (after resume/skip filtering). #
     # ------------------------------------------------------------------ #
-    # When resuming, skip all queries below the highest already-processed index for
-    # this run's scope. This avoids re-running queries that were attempted but produced
-    # no CFs (and therefore have no rows in done_query_indices).
-    this_run_indices = set(query_windows["query_index_original"].astype(int))
-    done_this_run = done_query_indices & this_run_indices
-    resume_floor = max(done_this_run) if done_this_run and getattr(args, "resume", False) else -1
-    print(f"Resume floor: {resume_floor} | done_query_indices={len(done_query_indices)} | this_run={len(this_run_indices)} | overlap={len(done_this_run)}", flush=True)
+    # Every query outcome — CF found, no_cf, or skipped (timeout) — writes a sentinel
+    # row to the summary file. So done_query_indices is a complete record of every
+    # query that was fully processed. A simple membership check is sufficient to skip
+    # already-done work; no floor index is needed.
+    #
+    # The previous resume_floor approach (skip all q_idx < max(done)) was intended to
+    # handle queries that were attempted but left no sentinel. Since every outcome now
+    # writes a sentinel, the floor is unnecessary and harmful: when a run is killed
+    # mid-batch, the highest-written index becomes the floor and permanently abandons
+    # every in-flight query below it.
+    print(f"Resuming: {len(done_query_indices)} query indices already processed.", flush=True)
 
     queries_to_run = []
     for _, query_row in query_windows.iterrows():
         q_idx = int(query_row["query_index_original"])
         if args.query_index is not None and q_idx < int(args.query_index):
-            continue
-        if q_idx < resume_floor:
             continue
         if q_idx in done_query_indices:
             print(f"Skipping query-index {q_idx} (already processed)", flush=True)
