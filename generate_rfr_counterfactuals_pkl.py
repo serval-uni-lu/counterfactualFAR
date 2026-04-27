@@ -38,7 +38,7 @@ DEFAULT_MAX_REFERENCE_WINDOWS = 100
 DEFAULT_DICE_METHOD = "genetic"
 DEFAULT_MAXITERATIONS = 10
 MIN_POSITIVE_UPLIFT = 1e-6
-MAX_DICE_SECONDS = 600  # raise RuntimeError if DiCE predict() is still running after this many seconds
+MAX_DICE_SECONDS = 300  # raise RuntimeError if DiCE predict() is still running after this many seconds
 
 
 def _load_model(model_path: Path):
@@ -159,10 +159,6 @@ class RFRPKLWindowWrapper:
         self.full_time_series[DEFAULT_TIMESTAMP_COL] = pd.to_datetime(self.full_time_series[DEFAULT_TIMESTAMP_COL])
         self.full_time_series = self.full_time_series.sort_values([DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]).reset_index(drop=True)
 
-    # ------------------------------------------------------------------
-    # Thread-local query context properties
-    # Context is keyed to the calling thread so concurrent queries are safe.
-    # ------------------------------------------------------------------
 
     @property
     def _context_item(self):
@@ -325,8 +321,8 @@ class RFRPKLWindowWrapper:
         asset_base_full = context_panel[context_panel[DEFAULT_ITEM_COL] == context_item]
         # Truncated version for CF candidate scoring: KPI rolling windows only need
         # min_history_len rows, so capping here avoids O(N) slowdown at high query indices.
-        # The full series is kept for the factual fallback, which needs enough history to
-        # produce valid KPIs even when recent prices are flat (std=0: Sharpe NaN).
+        # The full series is kept as fallback when the truncated history is insufficient
+        # for the model's KPI warm-up (model needs ~193+ rows; min_history_len = 131).
         asset_base = asset_base_full.iloc[-self.min_history_len:].reset_index(drop=True)
         item_indices = asset_base.index.to_numpy()
         if len(item_indices) < self.window_size:
@@ -336,6 +332,7 @@ class RFRPKLWindowWrapper:
             )
         target_indices = item_indices[-self.window_size:]
         rating_col_pos = asset_base.columns.get_loc(DEFAULT_RATING_COL)
+        rating_col_pos_full = asset_base_full.columns.get_loc(DEFAULT_RATING_COL)
 
         preds = []
         for idx in range(arr.shape[0]):
@@ -344,12 +341,17 @@ class RFRPKLWindowWrapper:
             try:
                 preds.append(self._predict_from_ts_context(ts_df, context_item, context_timestamp, model_obj=model_obj))
             except ValueError:
-                # This CF candidate's window values (e.g. zero prices) caused degenerate
-                # KPI rows (div-by-zero in ROI/Sharpe -> all NaN -> dropna -> 0 rows).
-                # Return 0.0 so DiCE can distinguish this bad candidate from the factual
-                # and evolve away from it. Returning factual_pred here would make all
-                # failed candidates look identical (flat fitness landscape -> no gradient).
-                preds.append(0.0)
+                # Truncated series may lack sufficient warm-up history for KPI computation.
+                # Retry with the full asset series and the same candidate prices.
+                ts_df_full = asset_base_full.copy()
+                ts_df_full.iloc[-self.window_size:, rating_col_pos_full] = arr[idx]
+                try:
+                    preds.append(self._predict_from_ts_context(ts_df_full, context_item, context_timestamp, model_obj=model_obj))
+                except ValueError:
+                    # Truly degenerate candidate prices (e.g. zeros -> div-by-zero in KPIs).
+                    # Use -inf so DiCE always ranks this candidate below any real prediction,
+                    # including negative profitability values where 0.0 would be misleadingly good.
+                    preds.append(float("-inf"))
         return np.asarray(preds, dtype=np.float64)
 
 
