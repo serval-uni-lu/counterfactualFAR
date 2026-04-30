@@ -6,9 +6,7 @@ name = "pypi"
 [packages]
 pandas = "*"
 scipy = "*"
-tabulate = "*"
 pandas-stubs = "*"
-scikit-learn = "*"
 ipykernel = "*"
 matplotlib = "*"
 skl2onnx = "*"
@@ -17,10 +15,13 @@ dice-ml = "*"
 termcolor = "*"
 torch = "==2.3.0"
 pytorch-tabnet = "*"
+scikit-learn = "*"
 numpy = "*"
+lightgbm = "*"
+optuna = "*"
+tabulate = "*"
 
 [dev-packages]
 
 [requires]
-python_version = "3.9"
-python_full_version = "3.9.6"
+python_version = "3.12"
