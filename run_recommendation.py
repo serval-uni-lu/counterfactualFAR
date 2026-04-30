@@ -1,4 +1,5 @@
 #!/usr/bin/python
+import json
 import os
 import sys
 
@@ -32,8 +33,8 @@ if __name__ == "__main__":
         sys.stderr.write("ERROR: Invalid arguments")
         sys.stderr.write("\tdataset_path: route to the dataset.")
         sys.stderr.write("\toutput_dir: directory on which to store the results.")
-        sys.stderr.write("\t(optional) model: rfr|mlp|tabnet")
-        sys.stderr.write("\t(optional) model params: rfr -> <n_estimators> <kpi_type>; mlp -> <hidden_sizes> [kpi_type]; tabnet -> [kpi_type]")
+        sys.stderr.write("\t(optional) model: rfr|lgbm|mlp|tabnet")
+        sys.stderr.write("\t(optional) model params: rfr/lgbm -> <n_estimators> <kpi_type>; mlp -> <hidden_sizes> [kpi_type]; tabnet -> [kpi_type]")
 
     dataset_path = sys.argv[1]
     output_directory = sys.argv[2]
@@ -53,10 +54,43 @@ if __name__ == "__main__":
         model_id = sys.argv[3]
         model_params = sys.argv[4:]
         if model_id == "rfr":
-            if model_params:
+            params_json = os.path.join("results", "hyperparam_selection", "rfr_full_short_optuna_results_best.json")
+            has_explicit = any("=" in str(p) or str(p).lstrip("+-").isdigit() for p in model_params)
+            if not has_explicit and os.path.exists(params_json):
+                with open(params_json) as f:
+                    best = json.load(f)
+                model_config = (
+                    "rfr", "rfr",
+                    str(best["n_estimators"]),
+                    best["kpi_type"],
+                    f"min_samples_leaf={best['min_samples_leaf']}",
+                    f"max_depth={best['max_depth']}",
+                    *model_params,
+                )
+                print(f"Loaded RFR params from {params_json}: {best}")
+            elif model_params:
                 model_config = ("rfr", "rfr", *model_params)
             else:
                 model_config = ("rfr", "rfr", "20", "full_short")
+        elif model_id == "lgbm":
+            params_json = os.path.join("results", "hyperparam_selection", "lgbm_full_short_optuna_results_best.json")
+            has_explicit = any("=" in str(p) or str(p).lstrip("+-").isdigit() for p in model_params)
+            if not has_explicit and os.path.exists(params_json):
+                with open(params_json) as f:
+                    best = json.load(f)
+                model_config = (
+                    "lgbm", "lgbm",
+                    str(best["n_estimators"]),
+                    best["kpi_type"],
+                    f"num_leaves={best['num_leaves']}",
+                    f"min_child_samples={best['min_child_samples']}",
+                    *model_params,
+                )
+                print(f"Loaded LGBM params from {params_json}: {best}")
+            elif model_params:
+                model_config = ("lgbm", "lgbm", *model_params)
+            else:
+                model_config = ("lgbm", "lgbm", "100", "full_short")
         elif model_id == "mlp":
             if model_params:
                 model_config = ("mlp", "mlp", *model_params)
@@ -68,7 +102,7 @@ if __name__ == "__main__":
             else:
                 model_config = ("tabnet", "tabnet", "full_short")
         else:
-            sys.exit("ERROR: model must be 'rfr', 'mlp' or 'tabnet'")
+            sys.exit("ERROR: model must be 'rfr', 'lgbm', 'mlp' or 'tabnet'")
 
     for date in dates:
         print("Starting", model_config[0], "for time horizon of", date[4], "month(s)")
