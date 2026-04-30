@@ -105,6 +105,96 @@ def _sanitize_filename(value):
 
 
 
+def save_generalization_gap_plots(all_run_metrics):
+    """For each model+params, produce one figure with 4 subplots:
+      MAE (train vs test), R² (train vs test), RMSE (train vs test),
+      Gap R² (generalization_gap_r2 only).
+
+    Each experiment gets its own pair of colors so train/test lines are visually
+    distinct both within and across experiments.
+    """
+    if not all_run_metrics:
+        return
+
+    plot_root = os.path.join(STATS_DIR, "plots", "model", "generalization_gap")
+    os.makedirs(plot_root, exist_ok=True)
+
+    # Colors per experiment: (train_color, test_color)
+    EXP_STYLE = {
+        "exp1_2019-08-01_to_2021-02-26": {
+            "train": ("#0181cb", "-"),   # blue solid
+            "test":  ("#66c2f5", "--"),  # light blue dashed
+        },
+        "exp2_2020-09-14_to_2022-05-23": {
+            "train": ("#e05c00", "-"),   # dark orange solid
+            "test":  ("#ffad7a", "--"),  # light orange dashed
+        },
+    }
+    EXP_DISPLAY = {
+        "exp1_2019-08-01_to_2021-02-26": "exp1 (2019–2021)",
+        "exp2_2020-09-14_to_2022-05-23": "exp2 (2020–2022)",
+    }
+    # Gap line colors (one per experiment)
+    EXP_GAP_COLOR = {
+        "exp1_2019-08-01_to_2021-02-26": "#0181cb",
+        "exp2_2020-09-14_to_2022-05-23": "#e05c00",
+    }
+
+    # Subplots: (title, [(metric_name, role)])  role is "train" | "test" | "gap"
+    SUBPLOTS = [
+        ("MAE",    [("train_mae",  "train"), ("test_mae",  "test")]),
+        ("R²",     [("train_r2",   "train"), ("test_r2",   "test")]),
+        ("RMSE",   [("train_rmse", "train"), ("test_rmse", "test")]),
+        ("Gap R²", [("generalization_gap_r2", "gap")]),
+    ]
+
+    all_gen_metrics = {m for _, pairs in SUBPLOTS for m, _ in pairs}
+
+    for run_prefix, all_metrics in all_run_metrics:
+        df = all_metrics[all_metrics["experiment"].isin(EXP_STYLE)].copy()
+        df = df[df["metric"].isin(all_gen_metrics)]
+        if df.empty:
+            continue
+
+        fig, axes = plt.subplots(1, 4, figsize=(22, 5), squeeze=False)
+
+        for col, (subplot_title, metric_pairs) in enumerate(SUBPLOTS):
+            ax = axes[0][col]
+            for exp_label, style in EXP_STYLE.items():
+                exp_df = df[df["experiment"] == exp_label]
+                for metric_name, role in metric_pairs:
+                    series = exp_df[exp_df["metric"] == metric_name].sort_values("split_date")
+                    if series.empty:
+                        continue
+                    if role == "gap":
+                        color = EXP_GAP_COLOR[exp_label]
+                        linestyle = "-"
+                    else:
+                        color, linestyle = style[role]
+                    ax.plot(
+                        series["split_date"],
+                        series["value"],
+                        color=color,
+                        linestyle=linestyle,
+                        linewidth=1.5,
+                        marker="o",
+                        markersize=3,
+                        label=f"{EXP_DISPLAY[exp_label]} — {role}",
+                    )
+
+            ax.set_title(subplot_title, fontsize=11)
+            ax.tick_params(axis="x", rotation=30, labelsize=7)
+            ax.tick_params(axis="y", labelsize=8)
+            ax.grid(axis="y", linestyle="--", alpha=0.3)
+            ax.legend(fontsize=7)
+
+        fig.suptitle(f"Generalization gap | {run_prefix}", fontsize=12)
+        fig.tight_layout()
+        out_file = os.path.join(plot_root, f"{_sanitize_filename(run_prefix)}.png")
+        fig.savefig(out_file, dpi=150)
+        plt.close(fig)
+
+
 def save_all_models_plots(all_run_stats_tables):
     if not all_run_stats_tables:
         return
@@ -558,6 +648,7 @@ def main():
     model_stats_dir = os.path.join(STATS_DIR, "model")
     os.makedirs(model_stats_dir, exist_ok=True)
     all_run_stats_tables = []
+    all_run_metrics = []
 
     model_folders = [
         name for name in sorted(os.listdir(RESULTS_ROOT))
@@ -588,6 +679,7 @@ def main():
             full_stats.to_csv(output_file, index=False)
             run_stats_tables.append((run_prefix, full_stats))
             all_run_stats_tables.append((run_prefix, full_stats))
+            all_run_metrics.append((run_prefix, all_metrics))
 
             # Per-experiment stats (including unclassified if present)
             for exp_label, exp_df in all_metrics.groupby("experiment"):
@@ -603,7 +695,9 @@ def main():
         print(f"  Saved stats for model group: {model_name}")
 
     save_all_models_plots(all_run_stats_tables)
+    save_generalization_gap_plots(all_run_metrics)
     print(f"Saved all-model plots in: {os.path.join(STATS_DIR, 'plots', 'model')}")
+    print(f"Saved generalization gap plots in: {os.path.join(STATS_DIR, 'plots', 'model', 'generalization_gap')}")
 
 
 if __name__ == "__main__":
