@@ -21,13 +21,14 @@ import pandas as pd
 from utils.constants import DEFAULT_TIMESTAMP_COL, DEFAULT_ITEM_COL, DEFAULT_USER_COL, DEFAULT_RATING_COL
 
 from algorithms.algorithm import Algorithm
+from algorithms.lgbm_kpi_model import LGBMKPIModel
 from algorithms.mlp_kpi_model import MLPKPIModel
 from algorithms.rfr_kpi_model import RFRKPIModel
 from algorithms.tabnet_kpi_model import TabNetKPIModel
 from algorithms.torch_kpi_window_encoder import KPIWindowEncoder, WindowToFeatureHeadModel
 
 
-INTERNAL_KPI_MODELS = (MLPKPIModel, TabNetKPIModel, RFRKPIModel)
+INTERNAL_KPI_MODELS = (MLPKPIModel, TabNetKPIModel, RFRKPIModel, LGBMKPIModel)
 
 
 class ProfitabilityPrediction(Algorithm):
@@ -64,6 +65,8 @@ class ProfitabilityPrediction(Algorithm):
             return "tabnet"
         if isinstance(self.model, RFRKPIModel):
             return "rfr"
+        if isinstance(self.model, LGBMKPIModel):
+            return "lgbm"
         return "rfr"
 
     def _safe_fragment(self, value):
@@ -87,6 +90,13 @@ class ProfitabilityPrediction(Algorithm):
 
         if isinstance(self.model, RFRKPIModel):
             n_estimators = getattr(self.model, "n_estimators", "na")
+            min_samples_leaf = getattr(self.model, "min_samples_leaf", "na")
+            max_depth = getattr(self.model, "max_depth", "na")
+            kpi_type = getattr(self.model, "kpi_type", "na")
+            return self._safe_fragment(f"n-{n_estimators}_leaf-{min_samples_leaf}_depth-{max_depth}_kpi-{kpi_type}_internal_kpis")
+
+        if isinstance(self.model, LGBMKPIModel):
+            n_estimators = getattr(self.model, "n_estimators", "na")
             kpi_type = getattr(self.model, "kpi_type", "na")
             return self._safe_fragment(f"n-{n_estimators}_kpi-{kpi_type}_internal_kpis")
 
@@ -106,6 +116,67 @@ class ProfitabilityPrediction(Algorithm):
     def _dataset_artifact_path(self, prefix, when, extension="csv"):
         name = f"{prefix}_{self._safe_fragment(when)}_{self._model_tag()}_{self._model_param_tag()}.{extension}"
         return os.path.join(self._artifact_dir(), name)
+
+    def _compute_generalization_metrics(self, kpi_train_feats, train_targets, kpi_test_feats, test_targets):
+        """Compute train/test regression metrics to assess generalization.
+
+        Uses the fitted underlying estimator directly on pre-computed KPI features,
+        avoiding a full KPI regeneration pass. Works for RFR, LGBM, and external sklearn models.
+        Returns a dict with R², RMSE, MAE on train and test, plus the generalization gap.
+        """
+        import numpy as np
+        from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+        try:
+            X_train = kpi_train_feats[self.indicators].astype(float)
+            X_test = kpi_test_feats[self.indicators].astype(float)
+            y_train = train_targets.values.astype(float)
+            y_test = test_targets.values.astype(float)
+
+            if len(X_train) == 0 or len(X_test) == 0:
+                return {}
+
+            # For internal models use the fitted underlying estimator directly
+            # (model.model is the RF/LGBM regressor, bypassing KPI regeneration).
+            # For external sklearn/lgbm models call predict() on features directly.
+            if isinstance(self.model, (RFRKPIModel, LGBMKPIModel)) and hasattr(self.model, "model"):
+                train_preds = self.model.model.predict(X_train)
+                test_preds = self.model.model.predict(X_test)
+            elif not isinstance(self.model, INTERNAL_KPI_MODELS):
+                train_preds = self.model.predict(X_train).flatten()
+                test_preds = self.model.predict(X_test).flatten()
+            else:
+                return {}  # MLP/TabNet: skip (non-trivial to re-score on KPI features)
+
+            train_r2   = float(r2_score(y_train, train_preds))
+            test_r2    = float(r2_score(y_test,  test_preds))
+            train_rmse = float(np.sqrt(mean_squared_error(y_train, train_preds)))
+            test_rmse  = float(np.sqrt(mean_squared_error(y_test,  test_preds)))
+            train_mae  = float(mean_absolute_error(y_train, train_preds))
+            test_mae   = float(mean_absolute_error(y_test,  test_preds))
+            gap        = train_r2 - test_r2
+
+            print(
+                f"Generalization | train_R²={train_r2:.4f}  test_R²={test_r2:.4f}  "
+                f"gap={gap:.4f} | train_RMSE={train_rmse:.4f}  test_RMSE={test_rmse:.4f} | "
+                f"n_train={len(y_train)}  n_test={len(y_test)}",
+                flush=True,
+            )
+
+            return {
+                "generalization_gap_r2": gap,
+                "train_r2":   train_r2,
+                "test_r2":    test_r2,
+                "train_rmse": train_rmse,
+                "test_rmse":  test_rmse,
+                "train_mae":  train_mae,
+                "test_mae":   test_mae,
+                "train_samples": int(len(y_train)),
+                "test_samples":  int(len(y_test)),
+            }
+        except Exception as exc:
+            print(f"WARNING: Could not compute generalization metrics: {exc}", flush=True)
+            return {}
 
     def _save_csv_if_missing(self, df, path):
         if not os.path.exists(path):
@@ -150,7 +221,7 @@ class ProfitabilityPrediction(Algorithm):
             return self.model.kpi_module.generate_kpis_df(time_series_df)
         if isinstance(self.model, TabNetKPIModel):
             return self.model._generate_kpis_df(time_series_df)
-        if isinstance(self.model, RFRKPIModel):
+        if isinstance(self.model, (RFRKPIModel, LGBMKPIModel)):
             return self.model._generate_kpis_df(time_series_df)
         raise ValueError("Internal KPI generation requested for a non-internal model")
 
@@ -162,7 +233,7 @@ class ProfitabilityPrediction(Algorithm):
             has_kpi_path = hasattr(self.model, "kpi_module") and hasattr(self.model.kpi_module, "generate_kpis_df")
         elif isinstance(self.model, TabNetKPIModel):
             has_kpi_path = hasattr(self.model, "_generate_kpis_df")
-        elif isinstance(self.model, RFRKPIModel):
+        elif isinstance(self.model, (RFRKPIModel, LGBMKPIModel)):
             has_kpi_path = hasattr(self.model, "_generate_kpis_df")
         else:
             has_kpi_path = False
@@ -277,7 +348,7 @@ class ProfitabilityPrediction(Algorithm):
                         device=device,
                         artifact_label=artifact_prefix,
                     )
-                elif isinstance(self.model, RFRKPIModel):
+                elif isinstance(self.model, (RFRKPIModel, LGBMKPIModel)):
                     self.model.fit(
                         training_time_series,
                         train_targets,
@@ -303,6 +374,14 @@ class ProfitabilityPrediction(Algorithm):
                 self.model.fit(kpi_indicators_features, goals)
             
             self.is_fitted = True
+
+            self.generalization_metrics_ = self._compute_generalization_metrics(
+                kpi_indicators_features,
+                goals,
+                kpi_indicators_test[aux_list_test[:-1]],  # features + item/timestamp, no target
+                kpi_indicators_test["target"],
+            )
+
             if self.save_for_testing:
                 os.makedirs(self._artifact_dir(), exist_ok=True)
 
@@ -467,14 +546,24 @@ class ProfitabilityPrediction(Algorithm):
                 onnx_model = convert_sklearn(self.model.model, initial_types=initial_type)
                 with open(self._artifact_path("profitability_recommendation", train_date, "onnx"), "wb") as f:
                     f.write(onnx_model.SerializeToString())
+            elif isinstance(self.model, LGBMKPIModel):
+                # skl2onnx does not support LGBMRegressor — save pkl only.
+                pipeline_path = self._artifact_path("profitability_recommendation_pipeline", train_date, "pkl")
+                _save_pickle_object(self.model, pipeline_path)
             else:
-                # For sklearn models, use skl2onnx
-                from skl2onnx import convert_sklearn
-                from skl2onnx.common.data_types import FloatTensorType
-                initial_type = [('float_input', FloatTensorType([None, len(self.indicators)]))]
-                onnx_model = convert_sklearn(self.model, initial_types=initial_type)
-                with open(self._artifact_path("profitability_recommendation", train_date, "onnx"), "wb") as f:
-                    f.write(onnx_model.SerializeToString())
+                # For external sklearn models, use skl2onnx.
+                # LGBMRegressor is not supported by skl2onnx — save pkl instead.
+                from lightgbm import LGBMRegressor as _LGBMRegressor
+                if isinstance(self.model, _LGBMRegressor):
+                    pipeline_path = self._artifact_path("profitability_recommendation_pipeline", train_date, "pkl")
+                    _save_pickle_object(self.model, pipeline_path)
+                else:
+                    from skl2onnx import convert_sklearn
+                    from skl2onnx.common.data_types import FloatTensorType
+                    initial_type = [('float_input', FloatTensorType([None, len(self.indicators)]))]
+                    onnx_model = convert_sklearn(self.model, initial_types=initial_type)
+                    with open(self._artifact_path("profitability_recommendation", train_date, "onnx"), "wb") as f:
+                        f.write(onnx_model.SerializeToString())
         else:
             raise Exception("Model is not fitted yet. Cannot save an untrained model.")
         
