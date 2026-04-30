@@ -20,6 +20,7 @@ import argparse
 import numpy as np
 import pandas as pd
 from utils.constants import DEFAULT_TIMESTAMP_COL, DEFAULT_ITEM_COL, DEFAULT_RATING_COL, DEFAULT_USER_COL
+from lightgbm import LGBMRegressor
 from sklearn.ensemble import RandomForestRegressor
 
 try:
@@ -29,6 +30,7 @@ except Exception:
 
 from algorithms.kpi_gen.load_kpi_generator import LoadKPIGenerator
 from algorithms.kpi_gen.ma_kpi_generator import MAKPIGenerator
+from algorithms.lgbm_kpi_model import LGBMKPIModel
 from algorithms.mlp_kpi_model import MLPKPIModel
 from algorithms.rfr_kpi_model import RFRKPIModel
 from algorithms.tabnet_kpi_model import TabNetKPIModel
@@ -84,20 +86,30 @@ full_short_kpis = ["past_profitability_21d", "past_profitability_63d", "past_pro
 
 # Regression
 RFR = "rfr"
+LGBM = "lgbm"
 MLP = "mlp"
 TABNET = "tabnet"
 MLP_KPI_TYPES = {"full", "basic", "basic_short", "full_short"}
 TABNET_ALLOWED_KEYS = {"kpi", "kpi_type", "n_d", "n_a", "n_steps"}
 
-
 def _parse_rfr_params(params):
     n = 100
     kpi_type = "full_short"
     use_internal = True
+    min_samples_leaf = 5
+    max_depth = 20
 
     for raw in params or []:
         token = str(raw).strip()
         if token == "":
+            continue
+
+        if "=" in token:
+            key, val = token.split("=", 1)
+            if key == "min_samples_leaf":
+                min_samples_leaf = int(val)
+            elif key == "max_depth":
+                max_depth = None if val in ("None", "null") else int(val)
             continue
 
         token_lower = token.lower()
@@ -112,7 +124,42 @@ def _parse_rfr_params(params):
         if token.lstrip("+-").isdigit():
             n = int(token)
 
-    return n, kpi_type, use_internal
+    return n, kpi_type, use_internal, min_samples_leaf, max_depth
+
+
+def _parse_lgbm_params(params):
+    n = 100
+    kpi_type = "full_short"
+    use_internal = True
+    num_leaves = 12
+    min_child_samples = 80
+
+    for raw in params or []:
+        token = str(raw).strip()
+        if token == "":
+            continue
+
+        if "=" in token:
+            key, val = token.split("=", 1)
+            if key == "num_leaves":
+                num_leaves = int(val)
+            elif key == "min_child_samples":
+                min_child_samples = int(val)
+            continue
+
+        token_lower = token.lower()
+        if token_lower in MLP_KPI_TYPES:
+            kpi_type = token_lower
+            continue
+
+        if token_lower in {"legacy", "external"}:
+            use_internal = False
+            continue
+
+        if token.lstrip("+-").isdigit():
+            n = int(token)
+
+    return n, kpi_type, use_internal, num_leaves, min_child_samples
 
 
 def _parse_mlp_params(params):
@@ -256,6 +303,9 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
     f = open(file + "_metrics.csv", "w")
     for key, val in metric_res.items():
         f.write(key + "\t" + str(val[1]) + "\n")
+    gen_metrics = getattr(algorithm, "generalization_metrics_", {})
+    for key, val in gen_metrics.items():
+        f.write(key + "\t" + str(val) + "\n")
     f.close()
 
 
@@ -294,10 +344,13 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
     hidden_sizes = None
     tabnet_cfg = None
     use_internal_rfr = True
+    use_internal_lgbm = True
     n = 20
 
     if model_id == RFR:
-        n, kpi_type, use_internal_rfr = _parse_rfr_params(param)
+        n, kpi_type, use_internal_rfr, min_samples_leaf, max_depth = _parse_rfr_params(param)
+    elif model_id == LGBM:
+        n, kpi_type, use_internal_lgbm, num_leaves, min_child_samples = _parse_lgbm_params(param)
     elif model_id == MLP:
         hidden_sizes, kpi_type = _parse_mlp_params(param)
     elif model_id == TABNET:
@@ -324,22 +377,34 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
                 kpi_features=feats,
                 random_state=42,
                 max_features="sqrt",
-                min_samples_leaf=5,
-                max_depth=20,
+                min_samples_leaf=min_samples_leaf,
+                max_depth=max_depth,
                 max_samples=0.8,
+                n_jobs=-1,
+                param_grid=None,
+            )
+        else:
+            alg_model = RandomForestRegressor(n_estimators=n)
+    elif model_id == LGBM:
+        if use_internal_lgbm:
+            alg_model = LGBMKPIModel(
+                n_estimators=n,
+                k=5,
+                kpi_type=kpi_type,
+                kpi_features=feats,
+                random_state=42,
+                max_depth=5,
+                num_leaves=num_leaves,
+                min_child_samples=min_child_samples,
+                subsample=0.6,
+                colsample_bytree=0.6,
+                learning_rate=0.03,
+                reg_lambda=2.0,
+                reg_alpha=0.0,
                 n_jobs=-1,
             )
         else:
-            alg_model = RandomForestRegressor(
-                n_estimators=n,
-                criterion="squared_error",
-                max_features="sqrt",
-                min_samples_leaf=5,
-                max_depth=20,
-                max_samples=0.8,
-                n_jobs=-1,
-                random_state=42,
-            )
+            alg_model = LGBMRegressor()
     elif model_id == MLP:
         # Create MLP model (KPI generation happens inside the model)
         alg_model = MLPKPIModel(
@@ -402,9 +467,14 @@ def get_name(rec_model, param):
             + "_ns"
             + str(tabnet_cfg["n_steps"])
         )
+    elif rec_model == LGBM:
+        n, kpi_type, use_internal_lgbm, _, _ = _parse_lgbm_params(param)
+        algorithm_name = LGBM + "_" + str(n) + "_" + kpi_type
+        if use_internal_lgbm:
+            algorithm_name += "_internal_kpis"
     else:
-        # For backward compatibility with RFR
-        n, kpi_type, use_internal_rfr = _parse_rfr_params(param)
+        # RFR (internal or external)
+        n, kpi_type, use_internal_rfr, _, _ = _parse_rfr_params(param)
         algorithm_name = RFR + "_" + str(n) + "_" + kpi_type
         if use_internal_rfr:
             algorithm_name += "_internal_kpis"
@@ -516,7 +586,7 @@ if __name__ == "__main__":
     parser_range.add_argument("num_future", help='Number of dates to look formward', type=int)
     parser_range.add_argument("output_dir", help="directory on which to store the outputs.")
     parser_range.add_argument("months", help="number of months to look into the future.")
-    parser_range.add_argument("model", help="model identifier", choices=[RFR, MLP, TABNET])
+    parser_range.add_argument("model", help="model identifier", choices=[RFR, LGBM, MLP, TABNET])
     parser_range.add_argument("params", help="model parameters", action="store", nargs="*")
 
     parser_fixed = subparsers.add_parser('fixed_dates', help='List of fixed dates to use. This mode provides fixed '
@@ -525,7 +595,7 @@ if __name__ == "__main__":
     parser_fixed.add_argument('future_dates', help='Comma separated list of test end dates. Date format: %Y-%m-%d')
     parser_fixed.add_argument("output_dir", help="directory on which to store the outputs.")
     parser_fixed.add_argument("months", help="number of months to look into the future.")
-    parser_fixed.add_argument("model", help="model identifier", choices=[RFR, MLP, TABNET])
+    parser_fixed.add_argument("model", help="model identifier", choices=[RFR, LGBM, MLP, TABNET])
     parser_fixed.add_argument("params", help="model parameters", action="store", nargs="*")
 
     args = parser.parse_args()
@@ -566,8 +636,12 @@ if __name__ == "__main__":
     params = args.params
 
     selected_kpi_type = "full_short"
+    use_internal_rfr = True
+    use_internal_lgbm = True
     if model == RFR:
-        _, selected_kpi_type, use_internal_rfr = _parse_rfr_params(params)
+        _, selected_kpi_type, use_internal_rfr, _, _ = _parse_rfr_params(params)
+    elif model == LGBM:
+        _, selected_kpi_type, use_internal_lgbm, _, _ = _parse_lgbm_params(params)
     elif model == MLP:
         _, selected_kpi_type = _parse_mlp_params(params)
     elif model == TABNET:
@@ -587,8 +661,8 @@ if __name__ == "__main__":
     print("Dataset loaded (" + '{}'.format(timeb) + ")")
 
     # Compute the technical indicators (required for Random Forest)
-    if model == RFR and not use_internal_rfr:
-        kpi_file = os.path.join(directory, f"kpis_{selected_kpi_type}.csv")
+    if (model == RFR and not use_internal_rfr) or (model == LGBM and not use_internal_lgbm):
+        kpi_file = os.path.join(directory, "kpis.csv")
         kpi_type = selected_kpi_type
 
         if os.path.exists(kpi_file):
