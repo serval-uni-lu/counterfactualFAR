@@ -216,3 +216,5 @@ results
 output
 for_testing
 artifacts_for_counterfactuals
+stats/plots/cf/cf_timeseries_*
+stats/plots/prices/
