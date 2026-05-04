@@ -144,6 +144,7 @@ class RFRKPIModel:
         self.transformer.kpi_features = kpi_features
 
         kpis_df = self._generate_kpis_df(time_series_df)
+
         # Cache so pipeline.fit() → transform() reuses this result instead of recomputing.
         self.transformer._kpi_cache = kpis_df
         if artifact_label is not None:

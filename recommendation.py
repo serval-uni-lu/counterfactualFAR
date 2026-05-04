@@ -381,7 +381,6 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
                 max_depth=max_depth,
                 max_samples=0.8,
                 n_jobs=-1,
-                param_grid=None,
             )
         else:
             alg_model = RandomForestRegressor(n_estimators=n)

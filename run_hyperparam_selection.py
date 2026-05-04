@@ -153,7 +153,6 @@ def run_selection(data, model_name, kpi_type, feats, output_path, n_trials=50):
                 max_depth=params["max_depth"],
                 max_samples=0.8,
                 n_jobs=-1,
-                param_grid=None,
             )
         else:
             params = {
