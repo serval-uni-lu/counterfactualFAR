@@ -1,116 +1,147 @@
-### Counterfactuals in asset recommendations
+# Counterfactuals in Asset Recommendations
 
-This project builds on "[FAR-Trans: An Investment Dataset for Financial Asset Recommendation](https://github.com/JavierSanzCruza/far-trans)" project.
+This project builds on [FAR-Trans: An Investment Dataset for Financial Asset Recommendation](https://github.com/JavierSanzCruza/far-trans). It focuses on profitability-based recommendation models and counterfactual explanation generation.
 
-However, from all implemented algorithms, we only use one for our purpose (RF). All the code lines that were changed are tagged with "# CHANGED" for fast tracking.
+**Data source:** https://researchdata.gla.ac.uk/1658/
 
+---
 
-**For installation**
+## Installation
 
-Create venv with python 3.9
+Create and activate a virtual environment with Python 3.9:
 
-```
+```bash
 pipenv --python /usr/bin/python3
-```
-
-Or 
-
-If your machine does not have python 3.9 run:
-
-```
-pipenv --python $(which python3)
-```
-
-Install all dependencies 
-```
 pipenv install
-```
-
-Initiate the environment
-```
 pipenv shell
 ```
 
-### Running the code
-Analyze the asset/customer profitability over time (<span style="color:coral">not needed for recommendation</span>):
+If Python 3.9 is not available at that path:
+
+```bash
+pipenv --python $(which python3)
+pipenv install
+pipenv shell
 ```
+
+---
+
+## Usage
+
+### 1. Dataset Analysis (optional)
+
+Analyse asset/customer profitability over time. Not required for running recommendations.
+
+```bash
 python3 run_dataset_analysis.py FAR-Trans-Data output
 ```
 
-Information about args:
-1. interactions       → transactions.csv
-2. time_series        → close_prices.csv
-3. subcommand         → range or fixed_dates
-   - if "range":
-     - min_date       → 2019-08-01
-     - max_date       → 2021-02-26
-     - num_splits     → 28
-     - num_future     → 13
-   - if "fixed_dates":
-     - split_dates    → ...
-     - future_dates   → ...
-4. output_dir         → output
-5. summary_file       → assets_1.csv
+Arguments:
 
+| Argument | Description | Example |
+|---|---|---|
+| `interactions` | Transactions file | `transactions.csv` |
+| `time_series` | Price file | `close_prices.csv` |
+| `subcommand` | `range` or `fixed_dates` | |
+| → `min_date` / `max_date` | Date range (if `range`) | `2019-08-01` / `2021-02-26` |
+| → `num_splits` / `num_future` | Split config (if `range`) | `28` / `13` |
+| → `split_dates` / `future_dates` | Explicit dates (if `fixed_dates`) | |
+| `output_dir` | Output directory | `output` |
+| `summary_file` | Summary CSV filename | `assets_1.csv` |
 
-**Obtain all recommendations**:
+---
 
-Three models are accepted: rfr, mlp and tabnet.
+### 2. Hyperparameter Selection
 
-Specify the parameters or defaults will be used.
+Run Optuna hyperparameter search and save results to a JSON file. Supported models: `rfr`, `lgbm`.
 
-For rfr, can be used _internal_ or _external_ kpis generation. _internal_ follows the same approach as mlp/tabnet
-
-```
-python3 run_recommendation.py FAR-Trans-Data results rfr 100 internal
+```bash
+python3 run_hyperparam_selection.py FAR-Trans-Data [--model rfr|lgbm] [--kpi-type full_short|full|basic|basic_short] [--n-trials 50]
 ```
 
+---
+
+### 3. Recommendations
+
+Supported models: `rfr`, `lgbm`, `mlp`, `tabnet`.
+
+**RFR** — loads hyperparameters from the JSON produced in step 2:
+
+```bash
+python3 run_recommendation.py FAR-Trans-Data results rfr
 ```
+
+Pass `n_estimators` directly to skip the JSON:
+
+```bash
+python3 run_recommendation.py FAR-Trans-Data results rfr 100
+```
+
+For RFR and LGBM, KPI generation can be _internal_ (default, same pipeline as MLP/TabNet) or _external_.
+
+**MLP:**
+
+```bash
 python3 run_recommendation.py FAR-Trans-Data results mlp 64 32 16
 ```
 
-```
+**TabNet:**
+
+```bash
 python3 run_recommendation.py FAR-Trans-Data results tabnet 32 32 3
 ```
 
-Run specific time recommendation
-```
-python3 recommendation.py Far-Trans-Data prices range 2019-08-01 2021-02-26 28 13 results 6 rfr
+**Run a single time window directly:**
+
+```bash
+python3 recommendation.py FAR-Trans-Data prices range 2019-08-01 2021-02-26 28 13 results 6 rfr
 ```
 
-**Compute the average metrics**
-```
+---
+
+### 4. Compute Average Metrics
+
+```bash
 python3 process_results.py model
 ```
 
-**Generate the counterfactuals**
+---
 
-By default, runs the last window of each experiment (exp1: 2020-08-28, exp2: 2021-11-23).
-Training/testing CSVs and output paths are auto-derived from the pkl filename.
-```
+### 5. Generate Counterfactuals
+
+By default, runs the last window of each experiment (exp1: `2020-08-28`, exp2: `2021-11-23`). Training/testing CSVs and output paths are auto-derived from the model pickle filename.
+
+```bash
 python3 generate_rfr_counterfactuals_pkl.py
 ```
 
-Run a single window:
-```
+Run for a specific window:
+
+```bash
 python3 generate_rfr_counterfactuals_pkl.py \
   --model-pkl artifacts_for_counterfactuals/rfr_n-100_kpi-full_short_internal_kpis/profitability_recommendation_pipeline_2020-08-28_00-00-00_rfr_n-100_kpi-full_short_internal_kpis.pkl
 ```
 
-**Analyse counterfactuals**
+---
 
-First, sort each CF file by query_index, and overwrites them in place
-```
+### 6. Analyse Counterfactuals
+
+Sort each counterfactual file by `query_index` (overwrites in place):
+
+```bash
 python3 process_results.py cf --sort
 ```
 
 Aggregate comparison across all assets (metric distributions + factual vs CF scatter):
-```
+
+```bash
 python3 process_results.py cf
 ```
-Saves `cf_summary_all_assets.png` and `cf_scatter_all_assets.png` to `stats/plots/cf/`.
+
+Output: `cf_summary_all_assets.png` and `cf_scatter_all_assets.png` saved to `stats/plots/cf/`.
 
 Plot the factual vs CF price window for a specific asset and query:
-```
+
+```bash
 python3 process_results.py cf --asset-id <ASSET_ID> --query-index <N>
 ```
