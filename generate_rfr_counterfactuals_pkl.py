@@ -7,6 +7,7 @@ through the saved internal RFR pipeline by regenerating KPIs from the synthetic 
 import argparse
 import json
 import pickle
+import random
 import re
 import time
 import os
@@ -819,6 +820,17 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
         if effective_method == "genetic":
             cf_kwargs["maxiterations"] = int(args.maxiterations)
 
+        # DiCE's genetic/random explainers draw from the *global* random/np.random state
+        # (no injectable RNG in the library), so seed it deterministically per query right
+        # before the search. This only gives reproducible results with --n-jobs 1: under
+        # multiple threads, concurrent searches interleave draws from that same global
+        # state, so the sequence each thread sees still depends on scheduling.
+        query_seed = (int(args.seed) + q_idx) % (2**32 - 1)
+        random.seed(query_seed)
+        np.random.seed(query_seed)
+        if effective_method == "random":
+            cf_kwargs["random_seed"] = query_seed
+
         t0 = time.time()
         try:
             dice_exp = exp_query.generate_counterfactuals(query_x, **cf_kwargs)
@@ -1060,10 +1072,29 @@ def main():
         default=False,
         help="Resume from last completed query (reads existing output file to skip already-processed indices)",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help=(
+            "Base seed for DiCE's search (derived per query as seed + query_index). "
+            "Only guarantees reproducible results with --n-jobs 1 — DiCE's genetic/random "
+            "explainers read from the global random/np.random state, so concurrent threads "
+            "interleave draws from it regardless of seeding."
+        ),
+    )
     args = parser.parse_args()
 
     if args.window_size is not None and int(args.window_size) != FIXED_WINDOW_SIZE:
         raise ValueError(f"This script is fixed to window-size={FIXED_WINDOW_SIZE}")
+
+    if int(args.n_jobs) != 1:
+        print(
+            "NOTE: --seed only guarantees reproducible counterfactuals with --n-jobs 1. "
+            "With multiple worker threads, DiCE's genetic/random search reads from a shared "
+            "global random state, so results can still vary run to run.",
+            flush=True,
+        )
 
     for pkl_path in args.model_pkl:
         training_path, testing_path = _derive_data_paths(pkl_path)
