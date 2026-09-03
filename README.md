@@ -65,7 +65,16 @@ Pass `n_estimators` and/or `kpi_type` directly:
 python3 run_recommendation.py FAR-Trans-Data results rfr 100 full_short
 ```
 
-KPI generation can be _internal_ (default) or _external_ (precomputed).
+**Internal vs. external KPI generation:**
+
+- **Internal (default)** — RFR/LGBM generate technical indicators on the fly, per training window, directly from raw price windows. No precomputed file needed; this is what `RFRKPIModel`/`LGBMKPIModel` do.
+- **External** — technical indicators are precomputed once for the whole dataset into `<output_dir>/kpis.csv` (computed on first run, reused on later runs) and a plain `RandomForestRegressor`/`LGBMRegressor` trains directly on those columns. Pass `legacy` or `external` as an extra model parameter:
+
+  ```bash
+  python3 run_recommendation.py FAR-Trans-Data results rfr 100 full_short external
+  ```
+
+  Note: the external path doesn't set `random_state`, so unlike the internal path (seeded, reproducible) its results vary between runs.
 
 **Run a single time window directly:**
 
@@ -97,6 +106,10 @@ Run for a specific window:
 python3 generate_rfr_counterfactuals_pkl.py \
   --model-pkl artifacts_for_counterfactuals/rfr_n-100_kpi-full_short_internal_kpis/profitability_recommendation_pipeline_2020-08-28_00-00-00_rfr_n-100_kpi-full_short_internal_kpis.pkl
 ```
+
+Reproducibility: the search is seeded per query (`--seed`, default 42), but that only guarantees identical results with `--n-jobs 1` — DiCE's genetic/random explainers draw from the global `random`/`np.random` state, so concurrent worker threads interleave draws unpredictably regardless of seeding.
+
+Re-running without `--resume` on an output directory that already has results refuses to proceed (to avoid silently overwriting them) — pass `--resume` to continue, or clear the old files first.
 
 ---
 
