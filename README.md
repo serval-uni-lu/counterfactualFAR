@@ -53,7 +53,7 @@ Arguments:
 
 ### 2. Recommendations
 
-Supported models: `rfr`, `lgbm`, `mlp`, `tabnet`. RFR and LGBM use plain, untuned defaults (`RandomForestRegressor(n_estimators=n)` / `LGBMRegressor(n_estimators=n)`, everything else left at library defaults).
+Supported models: `rfr`, `lgbm`. Both use plain, untuned defaults (`RandomForestRegressor(n_estimators=n)` / `LGBMRegressor(n_estimators=n)`, everything else left at library defaults).
 
 ```bash
 python3 run_recommendation.py FAR-Trans-Data results rfr
@@ -65,19 +65,7 @@ Pass `n_estimators` and/or `kpi_type` directly:
 python3 run_recommendation.py FAR-Trans-Data results rfr 100 full_short
 ```
 
-For RFR and LGBM, KPI generation can be _internal_ (default, same pipeline as MLP/TabNet) or _external_.
-
-**MLP:**
-
-```bash
-python3 run_recommendation.py FAR-Trans-Data results mlp 64 32 16
-```
-
-**TabNet:**
-
-```bash
-python3 run_recommendation.py FAR-Trans-Data results tabnet 32 32 3
-```
+KPI generation can be _internal_ (default) or _external_ (precomputed).
 
 **Run a single time window directly:**
 

@@ -12,8 +12,6 @@
 import datetime as dt
 import os
 import sys
-from multiprocessing import Process
-from multiprocessing import Semaphore
 
 import argparse
 
@@ -31,9 +29,7 @@ except Exception:
 from algorithms.kpi_gen.load_kpi_generator import LoadKPIGenerator
 from algorithms.kpi_gen.ma_kpi_generator import MAKPIGenerator
 from algorithms.lgbm_kpi_model import LGBMKPIModel
-from algorithms.mlp_kpi_model import MLPKPIModel
 from algorithms.rfr_kpi_model import RFRKPIModel
-from algorithms.tabnet_kpi_model import TabNetKPIModel
 from algorithms.profitability_prediction import ProfitabilityPrediction
 from data.filter.asset.asset_with_test_price import AssetWithTestPrice
 from data.filter.customer.customer_in_train import CustomerInTrain
@@ -87,10 +83,7 @@ full_short_kpis = ["past_profitability_21d", "past_profitability_63d", "past_pro
 # Regression
 RFR = "rfr"
 LGBM = "lgbm"
-MLP = "mlp"
-TABNET = "tabnet"
-MLP_KPI_TYPES = {"full", "basic", "basic_short", "full_short"}
-TABNET_ALLOWED_KEYS = {"kpi", "kpi_type", "n_d", "n_a", "n_steps"}
+KPI_TYPES = {"full", "basic", "basic_short", "full_short"}
 
 def _parse_rfr_params(params):
     n = 100
@@ -103,7 +96,7 @@ def _parse_rfr_params(params):
             continue
 
         token_lower = token.lower()
-        if token_lower in MLP_KPI_TYPES:
+        if token_lower in KPI_TYPES:
             kpi_type = token_lower
             continue
 
@@ -128,7 +121,7 @@ def _parse_lgbm_params(params):
             continue
 
         token_lower = token.lower()
-        if token_lower in MLP_KPI_TYPES:
+        if token_lower in KPI_TYPES:
             kpi_type = token_lower
             continue
 
@@ -140,99 +133,6 @@ def _parse_lgbm_params(params):
             n = int(token)
 
     return n, kpi_type, use_internal
-
-
-def _parse_mlp_params(params):
-    hidden_sizes = [64, 32, 16]
-    kpi_type = "full_short"
-
-    if not params:
-        return hidden_sizes, kpi_type
-
-    hidden_tokens = []
-
-    for raw in params:
-        token = str(raw).strip()
-        if token == "":
-            continue
-
-        token_lower = token.lower()
-        if token_lower in MLP_KPI_TYPES:
-            kpi_type = token_lower
-            continue
-
-        if token_lower.startswith("kpi="):
-            value = token_lower.split("=", 1)[1].strip()
-            if value in MLP_KPI_TYPES:
-                kpi_type = value
-            continue
-
-        cleaned = token.replace("[", "").replace("]", "")
-        pieces = [p.strip() for p in cleaned.split(",") if p.strip() != ""]
-        if not pieces:
-            continue
-
-        if all(piece.lstrip("+-").isdigit() for piece in pieces):
-            hidden_tokens.extend(pieces)
-
-    if hidden_tokens:
-        hidden_sizes = [int(x) for x in hidden_tokens]
-
-    return hidden_sizes, kpi_type
-
-
-def _parse_tabnet_params(params):
-    config = {
-        "kpi_type": "full_short",
-        "n_d": 32,
-        "n_a": 32,
-        "n_steps": 3,
-    }
-
-    if not params:
-        return config
-
-    positional = []
-    for raw in params:
-        token = str(raw).strip()
-        if token == "":
-            continue
-
-        token_lower = token.lower()
-        if token_lower in MLP_KPI_TYPES:
-            config["kpi_type"] = token_lower
-            continue
-
-        if "=" in token:
-            key, value = token.split("=", 1)
-            key = key.strip().lower()
-            value = value.strip()
-            if key not in TABNET_ALLOWED_KEYS:
-                continue
-            if key in {"kpi", "kpi_type"} and value.lower() in MLP_KPI_TYPES:
-                config["kpi_type"] = value.lower()
-            elif key in {"n_d", "n_a", "n_steps"}:
-                if value.lstrip("+-").isdigit():
-                    config[key] = int(value)
-            continue
-
-        positional.append(token)
-
-    numeric = []
-    for token in positional:
-        try:
-            numeric.append(float(token))
-        except ValueError:
-            pass
-
-    if len(numeric) >= 1:
-        config["n_d"] = int(numeric[0])
-    if len(numeric) >= 2:
-        config["n_a"] = int(numeric[1])
-    if len(numeric) >= 3:
-        config["n_steps"] = int(numeric[2])
-
-    return config
 
 
 def test(algorithm, eval_metrics, file, recomm_date, customers):
@@ -318,11 +218,9 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
     """
     alg_model = None
     full = False
-    
+
     # Parse parameters
     kpi_type = "full_short"
-    hidden_sizes = None
-    tabnet_cfg = None
     use_internal_rfr = True
     use_internal_lgbm = True
     n = 20
@@ -331,12 +229,7 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
         n, kpi_type, use_internal_rfr = _parse_rfr_params(param)
     elif model_id == LGBM:
         n, kpi_type, use_internal_lgbm = _parse_lgbm_params(param)
-    elif model_id == MLP:
-        hidden_sizes, kpi_type = _parse_mlp_params(param)
-    elif model_id == TABNET:
-        tabnet_cfg = _parse_tabnet_params(param)
-        kpi_type = tabnet_cfg["kpi_type"]
-    
+
     # Determine features based on kpi_type
     if kpi_type == "full":
         feats = full_kpis
@@ -372,28 +265,8 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
             )
         else:
             alg_model = LGBMRegressor()
-    elif model_id == MLP:
-        # Create MLP model (KPI generation happens inside the model)
-        alg_model = MLPKPIModel(
-            hidden_sizes=hidden_sizes,
-            k=5,
-            kpi_type=kpi_type,
-            kpi_features=feats,
-            seed=42,
-        )
     else:
-        if tabnet_cfg is None:
-            tabnet_cfg = _parse_tabnet_params(param)
-        alg_model = TabNetKPIModel(
-            k=5,
-            kpi_type=tabnet_cfg["kpi_type"],
-            kpi_features=feats,
-            n_d=tabnet_cfg["n_d"],
-            n_a=tabnet_cfg["n_a"],
-            n_steps=tabnet_cfg["n_steps"],
-            gamma=1.3,
-            lambda_sparse=1e-4,
-        )
+        raise ValueError(f"Unsupported model identifier: {model_id}")
 
     training_sizes_path = os.path.join(os.path.dirname(output_dir), "training_sizes.csv")
     algorithm = ProfitabilityPrediction(alg_model, financial_data, num_months, feats, -1,
@@ -416,25 +289,8 @@ def get_name(rec_model, param):
     print("model:" + rec_model)
 
     algorithm_name = None
-    
-    if rec_model == MLP:
-        hidden_sizes, kpi_type = _parse_mlp_params(param)
-        hidden_sizes_str = ",".join(str(x) for x in hidden_sizes)
-        algorithm_name = MLP + "_" + hidden_sizes_str + "_" + kpi_type
-    elif rec_model == TABNET:
-        tabnet_cfg = _parse_tabnet_params(param)
-        algorithm_name = (
-            TABNET
-            + "_"
-            + tabnet_cfg["kpi_type"]
-            + "_nd"
-            + str(tabnet_cfg["n_d"])
-            + "_na"
-            + str(tabnet_cfg["n_a"])
-            + "_ns"
-            + str(tabnet_cfg["n_steps"])
-        )
-    elif rec_model == LGBM:
+
+    if rec_model == LGBM:
         n, kpi_type, use_internal_lgbm = _parse_lgbm_params(param)
         algorithm_name = LGBM + "_" + str(n) + "_" + kpi_type
         if use_internal_lgbm:
@@ -553,7 +409,7 @@ if __name__ == "__main__":
     parser_range.add_argument("num_future", help='Number of dates to look formward', type=int)
     parser_range.add_argument("output_dir", help="directory on which to store the outputs.")
     parser_range.add_argument("months", help="number of months to look into the future.")
-    parser_range.add_argument("model", help="model identifier", choices=[RFR, LGBM, MLP, TABNET])
+    parser_range.add_argument("model", help="model identifier", choices=[RFR, LGBM])
     parser_range.add_argument("params", help="model parameters", action="store", nargs="*")
 
     parser_fixed = subparsers.add_parser('fixed_dates', help='List of fixed dates to use. This mode provides fixed '
@@ -562,7 +418,7 @@ if __name__ == "__main__":
     parser_fixed.add_argument('future_dates', help='Comma separated list of test end dates. Date format: %Y-%m-%d')
     parser_fixed.add_argument("output_dir", help="directory on which to store the outputs.")
     parser_fixed.add_argument("months", help="number of months to look into the future.")
-    parser_fixed.add_argument("model", help="model identifier", choices=[RFR, LGBM, MLP, TABNET])
+    parser_fixed.add_argument("model", help="model identifier", choices=[RFR, LGBM])
     parser_fixed.add_argument("params", help="model parameters", action="store", nargs="*")
 
     args = parser.parse_args()
@@ -609,10 +465,6 @@ if __name__ == "__main__":
         _, selected_kpi_type, use_internal_rfr = _parse_rfr_params(params)
     elif model == LGBM:
         _, selected_kpi_type, use_internal_lgbm = _parse_lgbm_params(params)
-    elif model == MLP:
-        _, selected_kpi_type = _parse_mlp_params(params)
-    elif model == TABNET:
-        selected_kpi_type = _parse_tabnet_params(params)["kpi_type"]
 
     # If the number of days is 0 for the delta, we choose as minimum date one in the distant past
     # (36525 days is exactly 100 years before the established date)
@@ -665,19 +517,9 @@ if __name__ == "__main__":
     for i in range(0, len(dates)):
         print("\t" + str(i) + "Training date: " + str(dates[i]) + "\tFuture date: " + str(future_dates[i]))
 
-    procs = []
-
     def_dates = []
     def_future_dates = []
     def_name = []
-
-    # GPU models (mlp/tabnet) run multiple windows in parallel across GPUs.
-    # RFR runs sequentially in the main process so n_jobs=-1 gets all CPUs without
-    # joblib's nested-parallelism cap that kicks in inside a subprocess.
-    import torch as _torch
-    _n_gpus = _torch.cuda.device_count() if _torch.cuda.is_available() else 0
-    _gpu_model = model in (MLP, TABNET)
-    semaphore = Semaphore(max(1, _n_gpus)) if _gpu_model else None
 
     # We first check the selected model is good.
     f_name = get_name(model, params)
@@ -732,25 +574,7 @@ if __name__ == "__main__":
         print("Executing algorithm: " + model + " Start date: " + str(rec_date) + " End date: " + str(future_date))
         # Next: we get the algorithm and the parameters:
 
-        if _gpu_model:
-            # MLP/TabNet: run windows in parallel subprocesses, one per GPU.
-            def _run(sem, *args):
-                try:
-                    regressor(*args)
-                finally:
-                    sem.release()
-
-            semaphore.acquire()
-            proc = Process(target=_run, args=(semaphore, model, params, splitted_data, rec_date, metrics, directory,
-                                              alg_name, months_term, save_for_testing))
-            procs.append(proc)
-            proc.start()
-        else:
-            # RFR: run directly in the main process so sklearn's n_jobs=-1 gets all
-            # CPUs without joblib's nested-parallelism cap inside a subprocess.
-            regressor(model, params, splitted_data, rec_date, metrics, directory, alg_name, months_term,
-                      save_for_testing)
-
-    if len(procs) > 0:
-        for proc in procs:
-            proc.join()
+        # Run directly in the main process so sklearn/lightgbm's n_jobs=-1 gets all
+        # CPUs without joblib's nested-parallelism cap inside a subprocess.
+        regressor(model, params, splitted_data, rec_date, metrics, directory, alg_name, months_term,
+                  save_for_testing)

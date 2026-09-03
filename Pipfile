@@ -14,11 +14,9 @@ onnxruntime = "*"
 dice-ml = "*"
 termcolor = "*"
 torch = "==2.3.0"
-pytorch-tabnet = "*"
 scikit-learn = "*"
 numpy = "*"
 lightgbm = "*"
-optuna = "*"
 tabulate = "*"
 
 [dev-packages]
