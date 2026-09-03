@@ -51,30 +51,18 @@ Arguments:
 
 ---
 
-### 2. Hyperparameter Selection
+### 2. Recommendations
 
-Run Optuna hyperparameter search and save results to a JSON file. Supported models: `rfr`, `lgbm`.
-
-```bash
-python3 run_hyperparam_selection.py FAR-Trans-Data [--model rfr|lgbm] [--kpi-type full_short|full|basic|basic_short] [--n-trials 50]
-```
-
----
-
-### 3. Recommendations
-
-Supported models: `rfr`, `lgbm`, `mlp`, `tabnet`.
-
-**RFR** — loads hyperparameters from the JSON produced in step 2:
+Supported models: `rfr`, `lgbm`, `mlp`, `tabnet`. RFR and LGBM use plain, untuned defaults (`RandomForestRegressor(n_estimators=n)` / `LGBMRegressor(n_estimators=n)`, everything else left at library defaults).
 
 ```bash
 python3 run_recommendation.py FAR-Trans-Data results rfr
 ```
 
-Pass `n_estimators` directly to skip the JSON:
+Pass `n_estimators` and/or `kpi_type` directly:
 
 ```bash
-python3 run_recommendation.py FAR-Trans-Data results rfr 100
+python3 run_recommendation.py FAR-Trans-Data results rfr 100 full_short
 ```
 
 For RFR and LGBM, KPI generation can be _internal_ (default, same pipeline as MLP/TabNet) or _external_.
@@ -99,7 +87,7 @@ python3 recommendation.py FAR-Trans-Data prices range 2019-08-01 2021-02-26 28 1
 
 ---
 
-### 4. Compute Average Metrics
+### 3. Compute Average Metrics
 
 ```bash
 python3 process_results.py model
@@ -107,7 +95,7 @@ python3 process_results.py model
 
 ---
 
-### 5. Generate Counterfactuals
+### 4. Generate Counterfactuals
 
 By default, runs the last window of each experiment (exp1: `2020-08-28`, exp2: `2021-11-23`). Training/testing CSVs and output paths are auto-derived from the model pickle filename.
 
@@ -124,7 +112,7 @@ python3 generate_rfr_counterfactuals_pkl.py \
 
 ---
 
-### 6. Analyse Counterfactuals
+### 5. Analyse Counterfactuals
 
 Sort each counterfactual file by `query_index` (overwrites in place):
 

@@ -93,10 +93,6 @@ class RFRKPIModel:
         kpi_type="full_short",
         kpi_features=None,
         random_state=42,
-        max_features="sqrt",
-        min_samples_leaf=5,
-        max_depth=20,
-        max_samples=0.8,
         n_jobs=-1,
     ):
         self.n_estimators = int(n_estimators)
@@ -104,10 +100,6 @@ class RFRKPIModel:
         self.kpi_type = kpi_type
         self.kpi_features = kpi_features
         self.random_state = random_state
-        self.max_features = max_features
-        self.min_samples_leaf = int(min_samples_leaf)
-        self.max_depth = max_depth
-        self.max_samples = max_samples
         self.n_jobs = n_jobs
 
         self.transformer = KPIFeatureTransformer(k=k, kpi_type=kpi_type, kpi_features=kpi_features)
@@ -116,11 +108,6 @@ class RFRKPIModel:
                 ("kpi", self.transformer),
                 ("rf", RandomForestRegressor(
                     n_estimators=self.n_estimators,
-                    criterion="squared_error",
-                    max_features=self.max_features,
-                    min_samples_leaf=self.min_samples_leaf,
-                    max_depth=self.max_depth,
-                    max_samples=self.max_samples,
                     n_jobs=self.n_jobs,
                     random_state=self.random_state,
                 )),

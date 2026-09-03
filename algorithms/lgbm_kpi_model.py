@@ -17,19 +17,11 @@ class LGBMKPIModel:
 
     def __init__(
         self,
-        n_estimators=200,
+        n_estimators=100,
         k=5,
         kpi_type="full_short",
         kpi_features=None,
         random_state=42,
-        max_depth=5,
-        num_leaves=12,
-        min_child_samples=80,
-        subsample=0.6,
-        colsample_bytree=0.6,
-        learning_rate=0.03,
-        reg_lambda=2.0,
-        reg_alpha=0.0,
         n_jobs=-1,
     ):
         self.n_estimators = int(n_estimators)
@@ -37,14 +29,6 @@ class LGBMKPIModel:
         self.kpi_type = kpi_type
         self.kpi_features = kpi_features
         self.random_state = random_state
-        self.max_depth = max_depth
-        self.num_leaves = num_leaves
-        self.min_child_samples = min_child_samples
-        self.subsample = subsample
-        self.colsample_bytree = colsample_bytree
-        self.learning_rate = learning_rate
-        self.reg_lambda = reg_lambda
-        self.reg_alpha = reg_alpha
         self.n_jobs = n_jobs
 
         self.transformer = KPIFeatureTransformer(k=k, kpi_type=kpi_type, kpi_features=kpi_features)
@@ -53,14 +37,6 @@ class LGBMKPIModel:
                 ("kpi", self.transformer),
                 ("lgbm", LGBMRegressor(
                     n_estimators=self.n_estimators,
-                    max_depth=self.max_depth,
-                    num_leaves=self.num_leaves,
-                    min_child_samples=self.min_child_samples,
-                    subsample=self.subsample,
-                    colsample_bytree=self.colsample_bytree,
-                    learning_rate=self.learning_rate,
-                    reg_lambda=self.reg_lambda,
-                    reg_alpha=self.reg_alpha,
                     n_jobs=self.n_jobs,
                     random_state=self.random_state,
                     verbose=-1,

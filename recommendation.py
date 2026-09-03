@@ -96,20 +96,10 @@ def _parse_rfr_params(params):
     n = 100
     kpi_type = "full_short"
     use_internal = True
-    min_samples_leaf = 5
-    max_depth = 20
 
     for raw in params or []:
         token = str(raw).strip()
         if token == "":
-            continue
-
-        if "=" in token:
-            key, val = token.split("=", 1)
-            if key == "min_samples_leaf":
-                min_samples_leaf = int(val)
-            elif key == "max_depth":
-                max_depth = None if val in ("None", "null") else int(val)
             continue
 
         token_lower = token.lower()
@@ -124,27 +114,17 @@ def _parse_rfr_params(params):
         if token.lstrip("+-").isdigit():
             n = int(token)
 
-    return n, kpi_type, use_internal, min_samples_leaf, max_depth
+    return n, kpi_type, use_internal
 
 
 def _parse_lgbm_params(params):
     n = 100
     kpi_type = "full_short"
     use_internal = True
-    num_leaves = 12
-    min_child_samples = 80
 
     for raw in params or []:
         token = str(raw).strip()
         if token == "":
-            continue
-
-        if "=" in token:
-            key, val = token.split("=", 1)
-            if key == "num_leaves":
-                num_leaves = int(val)
-            elif key == "min_child_samples":
-                min_child_samples = int(val)
             continue
 
         token_lower = token.lower()
@@ -159,7 +139,7 @@ def _parse_lgbm_params(params):
         if token.lstrip("+-").isdigit():
             n = int(token)
 
-    return n, kpi_type, use_internal, num_leaves, min_child_samples
+    return n, kpi_type, use_internal
 
 
 def _parse_mlp_params(params):
@@ -348,9 +328,9 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
     n = 20
 
     if model_id == RFR:
-        n, kpi_type, use_internal_rfr, min_samples_leaf, max_depth = _parse_rfr_params(param)
+        n, kpi_type, use_internal_rfr = _parse_rfr_params(param)
     elif model_id == LGBM:
-        n, kpi_type, use_internal_lgbm, num_leaves, min_child_samples = _parse_lgbm_params(param)
+        n, kpi_type, use_internal_lgbm = _parse_lgbm_params(param)
     elif model_id == MLP:
         hidden_sizes, kpi_type = _parse_mlp_params(param)
     elif model_id == TABNET:
@@ -376,10 +356,6 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
                 kpi_type=kpi_type,
                 kpi_features=feats,
                 random_state=42,
-                max_features="sqrt",
-                min_samples_leaf=min_samples_leaf,
-                max_depth=max_depth,
-                max_samples=0.8,
                 n_jobs=-1,
             )
         else:
@@ -392,14 +368,6 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
                 kpi_type=kpi_type,
                 kpi_features=feats,
                 random_state=42,
-                max_depth=5,
-                num_leaves=num_leaves,
-                min_child_samples=min_child_samples,
-                subsample=0.6,
-                colsample_bytree=0.6,
-                learning_rate=0.03,
-                reg_lambda=2.0,
-                reg_alpha=0.0,
                 n_jobs=-1,
             )
         else:
@@ -467,13 +435,13 @@ def get_name(rec_model, param):
             + str(tabnet_cfg["n_steps"])
         )
     elif rec_model == LGBM:
-        n, kpi_type, use_internal_lgbm, _, _ = _parse_lgbm_params(param)
+        n, kpi_type, use_internal_lgbm = _parse_lgbm_params(param)
         algorithm_name = LGBM + "_" + str(n) + "_" + kpi_type
         if use_internal_lgbm:
             algorithm_name += "_internal_kpis"
     else:
         # RFR (internal or external)
-        n, kpi_type, use_internal_rfr, _, _ = _parse_rfr_params(param)
+        n, kpi_type, use_internal_rfr = _parse_rfr_params(param)
         algorithm_name = RFR + "_" + str(n) + "_" + kpi_type
         if use_internal_rfr:
             algorithm_name += "_internal_kpis"
@@ -638,9 +606,9 @@ if __name__ == "__main__":
     use_internal_rfr = True
     use_internal_lgbm = True
     if model == RFR:
-        _, selected_kpi_type, use_internal_rfr, _, _ = _parse_rfr_params(params)
+        _, selected_kpi_type, use_internal_rfr = _parse_rfr_params(params)
     elif model == LGBM:
-        _, selected_kpi_type, use_internal_lgbm, _, _ = _parse_lgbm_params(params)
+        _, selected_kpi_type, use_internal_lgbm = _parse_lgbm_params(params)
     elif model == MLP:
         _, selected_kpi_type = _parse_mlp_params(params)
     elif model == TABNET:
