@@ -147,10 +147,13 @@ class RFRPKLWindowWrapper:
         self.window_size = len(self.window_cols)
         self.n_jobs = max(1, int(n_jobs))
         k = int(getattr(self.model, "k", 5))
-        kpi_features = getattr(self.model, "kpi_features", None) or []
-        period_values = [int(m) for f in kpi_features for m in re.findall(r"(\d+)d", f)]
-        max_period = max(period_values) if period_values else 126
-        self.min_history_len = max(self.window_size, max_period + k)
+        # ma_kpi_generator.py's period selection checks `kpi_type == "short"` literally,
+        # which never matches "full_short"/"basic_short" — so it always computes the
+        # 189d-period indicators internally regardless of which features the model actually
+        # uses (see kpi_features below).
+        model_kpi_type = str(getattr(self.model, "kpi_type", "") or "")
+        generator_max_period = 126 if model_kpi_type == "short" else 189
+        self.min_history_len = max(self.window_size, generator_max_period + k)
         if hasattr(self.model, "model") and hasattr(self.model.model, "n_jobs"):
             self.model.model.n_jobs = 1
         self._model_pickle = pickle.dumps(self.model)
@@ -321,8 +324,8 @@ class RFRPKLWindowWrapper:
         asset_base_full = context_panel[context_panel[DEFAULT_ITEM_COL] == context_item]
         # Truncated version for CF candidate scoring: KPI rolling windows only need
         # min_history_len rows, so capping here avoids O(N) slowdown at high query indices.
-        # The full series is kept as fallback when the truncated history is insufficient
-        # for the model's KPI warm-up (model needs ~193+ rows; min_history_len = 131).
+        # The full series is kept as fallback in case the truncated history still isn't
+        # enough for the model's KPI warm-up (e.g. an asset with data gaps).
         asset_base = asset_base_full.iloc[-self.min_history_len:].reset_index(drop=True)
         item_indices = asset_base.index.to_numpy()
         if len(item_indices) < self.window_size:
@@ -532,6 +535,29 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
                 f"Resuming: found {len(done_query_indices)} already-processed query indices "
                 f"(from cf_details / summary / timeseries)",
                 flush=True,
+            )
+
+    # Without --resume, the header-writing step below would unconditionally overwrite
+    # out_cf/out_summary/out_timeseries, discarding any results already in them. Refuse
+    # instead of silently wiping prior work — the caller must either pass --resume or
+    # explicitly clear the old files first.
+    if not getattr(args, "resume", False):
+        existing_with_data = []
+        for fpath in [out_cf, out_summary, out_timeseries]:
+            if not (fpath.exists() and fpath.stat().st_size > 0):
+                continue
+            try:
+                has_rows = len(pd.read_csv(fpath, usecols=["query_index"])) > 0
+            except Exception:
+                has_rows = True  # unreadable/corrupt: treat as "has content", don't risk silently wiping it
+            if has_rows:
+                existing_with_data.append(str(fpath))
+        if existing_with_data:
+            raise SystemExit(
+                "Refusing to start a fresh run: existing results found in:\n  "
+                + "\n  ".join(existing_with_data)
+                + "\nPass --resume to continue from where it left off, or remove/rename "
+                  "these files first if you intend to start over."
             )
 
     # If re-running a specific query, remove its existing rows from all output files first.
