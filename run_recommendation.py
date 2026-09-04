@@ -32,7 +32,7 @@ if __name__ == "__main__":
         sys.stderr.write("ERROR: Invalid arguments")
         sys.stderr.write("\tdataset_path: route to the dataset.")
         sys.stderr.write("\toutput_dir: directory on which to store the results.")
-        sys.stderr.write("\t(optional) model: rfr|lgbm")
+        sys.stderr.write("\t(optional) model: rfr|lgbm|tabpfn")
         sys.stderr.write("\t(optional) model params: rfr/lgbm -> <n_estimators> <kpi_type>")
 
     dataset_path = sys.argv[1]
@@ -62,8 +62,13 @@ if __name__ == "__main__":
                 model_config = ("lgbm", "lgbm", *model_params)
             else:
                 model_config = ("lgbm", "lgbm", "100", "full_short")
+        elif model_id == "tabpfn":
+            if model_params:
+                model_config = ("tabpfn", "tabpfn", *model_params)
+            else:
+                model_config = ("tabpfn", "tabpfn", "full_short")
         else:
-            sys.exit("ERROR: model must be 'rfr' or 'lgbm'")
+            sys.exit("ERROR: model must be 'rfr', 'lgbm', or 'tabpfn'")
 
     for date in dates:
         print("Starting", model_config[0], "for time horizon of", date[4], "month(s)")
