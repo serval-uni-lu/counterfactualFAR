@@ -21,9 +21,10 @@ from utils.constants import DEFAULT_TIMESTAMP_COL, DEFAULT_ITEM_COL, DEFAULT_USE
 from algorithms.algorithm import Algorithm
 from algorithms.lgbm_kpi_model import LGBMKPIModel
 from algorithms.rfr_kpi_model import RFRKPIModel
+from algorithms.tabpfn_kpi_model import TabPFNKPIModel
 
 
-INTERNAL_KPI_MODELS = (RFRKPIModel, LGBMKPIModel)
+INTERNAL_KPI_MODELS = (RFRKPIModel, LGBMKPIModel, TabPFNKPIModel)
 
 
 class ProfitabilityPrediction(Algorithm):
@@ -57,6 +58,8 @@ class ProfitabilityPrediction(Algorithm):
             return "rfr"
         if isinstance(self.model, LGBMKPIModel):
             return "lgbm"
+        if isinstance(self.model, TabPFNKPIModel):
+            return "tabpfn"
         return "rfr"
 
     def _safe_fragment(self, value):
@@ -88,6 +91,10 @@ class ProfitabilityPrediction(Algorithm):
                     f"n-{n_estimators}_leaves-{num_leaves}_minchild-{min_child_samples}_kpi-{kpi_type}_internal_kpis"
                 )
             return self._safe_fragment(f"n-{n_estimators}_kpi-{kpi_type}_internal_kpis")
+
+        if isinstance(self.model, TabPFNKPIModel):
+            kpi_type = getattr(self.model, "kpi_type", "na")
+            return self._safe_fragment(f"kpi-{kpi_type}_internal_kpis")
 
         n_estimators = getattr(self.model, "n_estimators", "na")
         return self._safe_fragment(f"n-{n_estimators}")
@@ -126,9 +133,9 @@ class ProfitabilityPrediction(Algorithm):
                 return {}
 
             # For internal models use the fitted underlying estimator directly
-            # (model.model is the RF/LGBM regressor, bypassing KPI regeneration).
+            # (model.model is the RF/LGBM/TabPFN regressor, bypassing KPI regeneration).
             # For external sklearn/lgbm models call predict() on features directly.
-            if isinstance(self.model, (RFRKPIModel, LGBMKPIModel)) and hasattr(self.model, "model"):
+            if isinstance(self.model, INTERNAL_KPI_MODELS) and hasattr(self.model, "model"):
                 train_preds = self.model.model.predict(X_train)
                 test_preds = self.model.model.predict(X_test)
             elif not isinstance(self.model, INTERNAL_KPI_MODELS):
@@ -206,7 +213,7 @@ class ProfitabilityPrediction(Algorithm):
                 updated.to_csv(out_path, index=False)
 
     def _generate_internal_kpis(self, time_series_df):
-        if isinstance(self.model, (RFRKPIModel, LGBMKPIModel)):
+        if isinstance(self.model, INTERNAL_KPI_MODELS):
             return self.model._generate_kpis_df(time_series_df)
         raise ValueError("Internal KPI generation requested for a non-internal model")
 
@@ -219,7 +226,7 @@ class ProfitabilityPrediction(Algorithm):
         if not has_kpi_path:
             raise ValueError(
                 "Internal model contract violation: missing time-series→KPI generation path. "
-                "Expected RFRKPIModel/LGBMKPIModel._generate_kpis_df."
+                "Expected RFRKPIModel/LGBMKPIModel/TabPFNKPIModel._generate_kpis_df."
             )
 
         if not hasattr(self.model, "fit"):
@@ -360,6 +367,10 @@ class ProfitabilityPrediction(Algorithm):
                     f.write(onnx_model.SerializeToString())
             elif isinstance(self.model, LGBMKPIModel):
                 # skl2onnx does not support LGBMRegressor — save pkl only.
+                pipeline_path = self._artifact_path("profitability_recommendation_pipeline", train_date, "pkl")
+                _save_pickle_object(self.model, pipeline_path)
+            elif isinstance(self.model, TabPFNKPIModel):
+                # skl2onnx does not support TabPFN's transformer architecture — save pkl only.
                 pipeline_path = self._artifact_path("profitability_recommendation_pipeline", train_date, "pkl")
                 _save_pickle_object(self.model, pipeline_path)
             else:
