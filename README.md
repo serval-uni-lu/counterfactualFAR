@@ -62,13 +62,19 @@ python3 run_recommendation.py FAR-Trans-Data results rfr
 Pass `n_estimators` and/or `kpi_type` directly:
 
 ```bash
-python3 run_recommendation.py FAR-Trans-Data results rfr 100 full_short
+python3 run_recommendation.py FAR-Trans-Data results rfr 100 short
+```
+
+`tabpfn` is internal-only and only takes a `kpi_type` parameter — no `n_estimators`, and no `tuned` mode.
+
+```bash
+python3 run_recommendation.py FAR-Trans-Data results tabpfn
 ```
 
 **Internal vs. external KPI generation:**
 
 - **Internal (default)** — RFR/LGBM generate technical indicators on the fly, per training window, directly from raw price windows. No precomputed file needed; this is what `RFRKPIModel`/`LGBMKPIModel` do.
-- **External** — technical indicators are precomputed once for the whole dataset into `<output_dir>/kpis.csv` (computed on first run, reused on later runs) and a plain `RandomForestRegressor`/`LGBMRegressor` trains directly on those columns. Pass `legacy` or `external` as an extra model parameter:
+- **External** — technical indicators are precomputed once for the whole dataset into `<output_dir>/kpis.csv` (computed on first run, reused on later runs) and a plain `RandomForestRegressor`/`LGBMRegressor` trains directly on those columns. Pass `external` as an extra model parameter:
 
   ```bash
   python3 run_recommendation.py FAR-Trans-Data results rfr 100 full_short external
@@ -82,17 +88,6 @@ python3 run_recommendation.py FAR-Trans-Data results rfr 100 full_short
 python3 recommendation.py FAR-Trans-Data prices range 2019-08-01 2021-02-26 28 13 results 6 rfr
 ```
 
-**TabPFN:**
-
-```bash
-python3 run_recommendation.py FAR-Trans-Data results tabpfn
-```
-
-`tabpfn` is internal-only and only takes a `kpi_type` parameter — no `n_estimators`, and no `tuned` mode:
-
-```bash
-python3 run_recommendation.py FAR-Trans-Data results tabpfn full_short
-```
 
 ---
 
