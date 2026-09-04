@@ -53,7 +53,7 @@ Arguments:
 
 ### 2. Recommendations
 
-Supported models: `rfr`, `lgbm`. Both use plain, untuned defaults (`RandomForestRegressor(n_estimators=n)` / `LGBMRegressor(n_estimators=n)`, everything else left at library defaults).
+Supported models: `rfr`, `lgbm`. Both use plain, untuned defaults (`RandomForestRegressor(n_estimators=n)` / `LGBMRegressor(n_estimators=n)`, everything else left at library defaults) unless you pass `tuned` (see [Hyperparameter Tuning](#2b-hyperparameter-tuning-optuna) below).
 
 ```bash
 python3 run_recommendation.py FAR-Trans-Data results rfr
@@ -81,6 +81,30 @@ python3 run_recommendation.py FAR-Trans-Data results rfr 100 full_short
 ```bash
 python3 recommendation.py FAR-Trans-Data prices range 2019-08-01 2021-02-26 28 13 results 6 rfr
 ```
+
+---
+
+### 2b. Hyperparameter Tuning (Optuna)
+
+Search RFR/LGBM hyperparameters with Optuna against a single fixed window — exp1's first split (`2019-08-01`) — then save the best config for the `tuned` model parameter to pick up.
+
+```bash
+python3 algorithms/tune_hyperparams.py FAR-Trans-Data rfr --n-trials 20
+python3 algorithms/tune_hyperparams.py FAR-Trans-Data lgbm --n-trials 20
+```
+
+- Objective: `monthly_prof@10` (ROI) on that one window, maximized.
+- Search space: `n_estimators`, `min_samples_leaf`, `max_depth` for RFR; `n_estimators`, `num_leaves`, `min_child_samples` for LGBM.
+- KPIs for the window are computed once up front (not per trial), so each trial only pays for the regressor fit itself.
+
+Apply the saved best params across all windows in both experiments:
+
+```bash
+python3 run_recommendation.py FAR-Trans-Data results rfr tuned
+python3 run_recommendation.py FAR-Trans-Data results lgbm tuned
+```
+
+Requires the best-params JSON above to already exist. Produces `rfr_tuned_full_short_internal_kpis` / `lgbm_tuned_full_short_internal_kpis` results alongside (not overwriting) the untuned baseline runs.
 
 ---
 
