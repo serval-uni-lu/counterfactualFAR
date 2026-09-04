@@ -34,7 +34,7 @@ class MonthlyKPIEvaluationMetric(KPIEvaluationMetric):
 
         aux_recs = recs[recs[DEFAULT_USER_COL].isin(customers)]
         aux_recs = aux_recs.groupby(DEFAULT_USER_COL).head(cutoff)
-        aux_recs["metric"] = aux_recs[DEFAULT_ITEM_COL].apply(lambda x: self.values[x], 30)
+        aux_recs["metric"] = aux_recs[DEFAULT_ITEM_COL].apply(lambda x: self.values[x])
         aux_recs = aux_recs.groupby(DEFAULT_USER_COL).mean()
         aggregated = aux_recs["metric"].sum() / (0.0 + len(customers))
 
