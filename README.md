@@ -53,7 +53,7 @@ Arguments:
 
 ### 2. Recommendations
 
-Supported models: `rfr`, `lgbm`. Both use plain, untuned defaults (`RandomForestRegressor(n_estimators=n)` / `LGBMRegressor(n_estimators=n)`, everything else left at library defaults) unless you pass `tuned` (see [Hyperparameter Tuning](#2b-hyperparameter-tuning-optuna) below).
+Supported models: `rfr`, `lgbm`, `tabpfn`. `rfr`/`lgbm` use plain, untuned defaults (`RandomForestRegressor(n_estimators=n)` / `LGBMRegressor(n_estimators=n)`, everything else left at library defaults) unless you pass `tuned` (see [Hyperparameter Tuning](#2b-hyperparameter-tuning-optuna) below).
 
 ```bash
 python3 run_recommendation.py FAR-Trans-Data results rfr
@@ -80,6 +80,18 @@ python3 run_recommendation.py FAR-Trans-Data results rfr 100 full_short
 
 ```bash
 python3 recommendation.py FAR-Trans-Data prices range 2019-08-01 2021-02-26 28 13 results 6 rfr
+```
+
+**TabPFN:**
+
+```bash
+python3 run_recommendation.py FAR-Trans-Data results tabpfn
+```
+
+`tabpfn` is internal-only and only takes a `kpi_type` parameter — no `n_estimators`, and no `tuned` mode:
+
+```bash
+python3 run_recommendation.py FAR-Trans-Data results tabpfn full_short
 ```
 
 ---
