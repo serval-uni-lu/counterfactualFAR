@@ -19,6 +19,7 @@ import argparse
 import numpy as np
 import pandas as pd
 from utils.constants import DEFAULT_TIMESTAMP_COL, DEFAULT_ITEM_COL, DEFAULT_RATING_COL, DEFAULT_USER_COL
+from codecarbon import EmissionsTracker
 from lightgbm import LGBMRegressor
 from sklearn.ensemble import RandomForestRegressor
 
@@ -31,6 +32,7 @@ from algorithms.kpi_gen.load_kpi_generator import LoadKPIGenerator
 from algorithms.kpi_gen.ma_kpi_generator import MAKPIGenerator
 from algorithms.lgbm_kpi_model import LGBMKPIModel
 from algorithms.rfr_kpi_model import RFRKPIModel
+from algorithms.tabpfn_kpi_model import TabPFNKPIModel
 from algorithms.profitability_prediction import ProfitabilityPrediction
 from data.filter.asset.asset_with_test_price import AssetWithTestPrice
 from data.filter.customer.customer_in_train import CustomerInTrain
@@ -84,6 +86,7 @@ full_short_kpis = ["past_profitability_21d", "past_profitability_63d", "past_pro
 # Regression
 RFR = "rfr"
 LGBM = "lgbm"
+TABPFN = "tabpfn"
 KPI_TYPES = {"full", "basic", "basic_short", "full_short"}
 
 def _parse_rfr_params(params):
@@ -146,6 +149,29 @@ def _parse_lgbm_params(params):
     return n, kpi_type, use_internal, tuned
 
 
+def _parse_tabpfn_params(params):
+    """TabPFN has no parameters. Reject anything else explicitly
+    rather than silently ignoring it."""
+    kpi_type = "full_short"
+
+    for raw in params or []:
+        token = str(raw).strip()
+        if token == "":
+            continue
+
+        token_lower = token.lower()
+        if token_lower in KPI_TYPES:
+            kpi_type = token_lower
+            continue
+
+        raise ValueError(
+            f"Unsupported tabpfn parameter: '{token}'. Only a kpi_type "
+            f"({sorted(KPI_TYPES)}) is supported for tabpfn."
+        )
+
+    return kpi_type
+
+
 def _load_tuned_params(model_id, kpi_type):
     """Load Optuna-selected hyperparams saved by tune_hyperparams.py.
 
@@ -179,13 +205,50 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
     timeaa = dt.datetime.now()
     print("Started " + file)
 
+    # Energy/CO2 tracking spans train+recommend (best-effort: a cluster node without
+    # RAPL/GPU access or internet for the geolocation lookup shouldn't fail the whole
+    # window, just skip the energy columns for it).
+    energy_metrics = {}
+    emissions_path = f"{file}_emissions.csv"
+    tracker = None
+    try:
+        tracker = EmissionsTracker(
+            output_dir=os.path.dirname(emissions_path) or ".",
+            output_file=os.path.basename(emissions_path),
+            measure_power_secs=1,
+            log_level="error",
+        )
+        tracker.start()
+    except Exception as exc:
+        print(f"WARNING: Could not start energy tracker for {file}: {exc}", flush=True)
+        tracker = None
+
     # 1. Train the algorithm:
+    train_start = dt.datetime.now()
     algorithm.train(recomm_date)
+    train_seconds = (dt.datetime.now() - train_start).total_seconds()
     time_elapsed = dt.datetime.now() - timeaa
     print("Algorithm " + file + " trained (" + '{}'.format(time_elapsed) + ")")
 
     # 2. Generate the recommendations:
+    predict_start = dt.datetime.now()
     recs = algorithm.recommend(recomm_date, customers, False, True)
+    predict_seconds = (dt.datetime.now() - predict_start).total_seconds()
+
+    if tracker is not None:
+        try:
+            tracker.stop()
+            emissions_df = pd.read_csv(emissions_path)
+            last_run = emissions_df.iloc[-1]
+            energy_metrics = {
+                "energy_consumed_kwh": float(last_run["energy_consumed"]),
+                "cpu_energy_kwh": float(last_run["cpu_energy"]),
+                "gpu_energy_kwh": float(last_run["gpu_energy"]),
+                "ram_energy_kwh": float(last_run["ram_energy"]),
+            }
+        except Exception as exc:
+            print(f"WARNING: Could not read energy tracking results for {file}: {exc}", flush=True)
+
     recs = recs.sort_values(by=[DEFAULT_USER_COL, DEFAULT_RATING_COL], ascending=[False, False])
     recs.to_csv(file + "_recs.txt", index=False)
     time_elapsed = dt.datetime.now() - timea
@@ -211,6 +274,16 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
     f = open(file + "_metrics.csv", "w")
     for key, val in metric_res.items():
         f.write(key + "\t" + str(val[1]) + "\n")
+    # Computational cost
+    timing_metrics = {
+        "train_seconds": train_seconds,
+        "predict_seconds": predict_seconds,
+        "total_seconds": train_seconds + predict_seconds,
+    }
+    for key, val in timing_metrics.items():
+        f.write(key + "\t" + str(val) + "\n")
+    for key, val in energy_metrics.items():
+        f.write(key + "\t" + str(val) + "\n")
     gen_metrics = getattr(algorithm, "generalization_metrics_", {})
     for key, val in gen_metrics.items():
         f.write(key + "\t" + str(val) + "\n")
@@ -258,6 +331,8 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
         n, kpi_type, use_internal_rfr, tuned = _parse_rfr_params(param)
     elif model_id == LGBM:
         n, kpi_type, use_internal_lgbm, tuned = _parse_lgbm_params(param)
+    elif model_id == TABPFN:
+        kpi_type = _parse_tabpfn_params(param)
 
     # Determine features based on kpi_type
     if kpi_type == "full":
@@ -300,6 +375,8 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
             alg_model = LGBMKPIModel(**lgbm_kwargs)
         else:
             alg_model = LGBMRegressor()
+    elif model_id == TABPFN:
+        alg_model = TabPFNKPIModel(k=5, kpi_type=kpi_type, kpi_features=feats, random_state=42)
     else:
         raise ValueError(f"Unsupported model identifier: {model_id}")
 
@@ -331,6 +408,9 @@ def get_name(rec_model, param):
         algorithm_name = LGBM + "_" + name_n + "_" + kpi_type
         if use_internal_lgbm:
             algorithm_name += "_internal_kpis"
+    elif rec_model == TABPFN:
+        kpi_type = _parse_tabpfn_params(param)
+        algorithm_name = TABPFN + "_" + kpi_type + "_internal_kpis"
     else:
         # RFR (internal or external)
         n, kpi_type, use_internal_rfr, tuned = _parse_rfr_params(param)
@@ -446,7 +526,7 @@ if __name__ == "__main__":
     parser_range.add_argument("num_future", help='Number of dates to look formward', type=int)
     parser_range.add_argument("output_dir", help="directory on which to store the outputs.")
     parser_range.add_argument("months", help="number of months to look into the future.")
-    parser_range.add_argument("model", help="model identifier", choices=[RFR, LGBM])
+    parser_range.add_argument("model", help="model identifier", choices=[RFR, LGBM, TABPFN])
     parser_range.add_argument("params", help="model parameters", action="store", nargs="*")
 
     parser_fixed = subparsers.add_parser('fixed_dates', help='List of fixed dates to use. This mode provides fixed '
@@ -455,7 +535,7 @@ if __name__ == "__main__":
     parser_fixed.add_argument('future_dates', help='Comma separated list of test end dates. Date format: %Y-%m-%d')
     parser_fixed.add_argument("output_dir", help="directory on which to store the outputs.")
     parser_fixed.add_argument("months", help="number of months to look into the future.")
-    parser_fixed.add_argument("model", help="model identifier", choices=[RFR, LGBM])
+    parser_fixed.add_argument("model", help="model identifier", choices=[RFR, LGBM, TABPFN])
     parser_fixed.add_argument("params", help="model parameters", action="store", nargs="*")
 
     args = parser.parse_args()

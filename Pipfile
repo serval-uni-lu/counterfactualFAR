@@ -19,6 +19,8 @@ numpy = "*"
 lightgbm = "*"
 tabulate = "*"
 optuna = "*"
+tabpfn = "*"
+codecarbon = "*"
 
 [dev-packages]
 
