@@ -22,6 +22,8 @@ class LGBMKPIModel:
         kpi_type="full_short",
         kpi_features=None,
         random_state=42,
+        num_leaves=31,
+        min_child_samples=20,
         n_jobs=-1,
     ):
         self.n_estimators = int(n_estimators)
@@ -29,6 +31,8 @@ class LGBMKPIModel:
         self.kpi_type = kpi_type
         self.kpi_features = kpi_features
         self.random_state = random_state
+        self.num_leaves = int(num_leaves)
+        self.min_child_samples = int(min_child_samples)
         self.n_jobs = n_jobs
 
         self.transformer = KPIFeatureTransformer(k=k, kpi_type=kpi_type, kpi_features=kpi_features)
@@ -37,6 +41,8 @@ class LGBMKPIModel:
                 ("kpi", self.transformer),
                 ("lgbm", LGBMRegressor(
                     n_estimators=self.n_estimators,
+                    num_leaves=self.num_leaves,
+                    min_child_samples=self.min_child_samples,
                     n_jobs=self.n_jobs,
                     random_state=self.random_state,
                     verbose=-1,

@@ -10,6 +10,7 @@
 
 
 import datetime as dt
+import json
 import os
 import sys
 
@@ -89,6 +90,7 @@ def _parse_rfr_params(params):
     n = 100
     kpi_type = "full_short"
     use_internal = True
+    tuned = False
 
     for raw in params or []:
         token = str(raw).strip()
@@ -104,16 +106,21 @@ def _parse_rfr_params(params):
             use_internal = False
             continue
 
+        if token_lower == "tuned":
+            tuned = True
+            continue
+
         if token.lstrip("+-").isdigit():
             n = int(token)
 
-    return n, kpi_type, use_internal
+    return n, kpi_type, use_internal, tuned
 
 
 def _parse_lgbm_params(params):
     n = 100
     kpi_type = "full_short"
     use_internal = True
+    tuned = False
 
     for raw in params or []:
         token = str(raw).strip()
@@ -129,10 +136,31 @@ def _parse_lgbm_params(params):
             use_internal = False
             continue
 
+        if token_lower == "tuned":
+            tuned = True
+            continue
+
         if token.lstrip("+-").isdigit():
             n = int(token)
 
-    return n, kpi_type, use_internal
+    return n, kpi_type, use_internal, tuned
+
+
+def _load_tuned_params(model_id, kpi_type):
+    """Load Optuna-selected hyperparams saved by tune_hyperparams.py.
+
+    Returns the parsed JSON dict, e.g. {"n_estimators": 50, "min_samples_leaf": 87,
+    "max_depth": None} for rfr, or raises if the file is missing (a "tuned" run
+    with no saved params to apply is a configuration error, not something to
+    silently fall back on).
+    """
+    path = os.path.join("results", "hyperparam_selection", f"{model_id}_{kpi_type}_optuna_results_best.json")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"No saved tuned params at {path}. Run tune_hyperparams.py for '{model_id}' first."
+        )
+    with open(path, "r") as handle:
+        return json.load(handle)
 
 
 def test(algorithm, eval_metrics, file, recomm_date, customers):
@@ -223,12 +251,13 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
     kpi_type = "full_short"
     use_internal_rfr = True
     use_internal_lgbm = True
+    tuned = False
     n = 20
 
     if model_id == RFR:
-        n, kpi_type, use_internal_rfr = _parse_rfr_params(param)
+        n, kpi_type, use_internal_rfr, tuned = _parse_rfr_params(param)
     elif model_id == LGBM:
-        n, kpi_type, use_internal_lgbm = _parse_lgbm_params(param)
+        n, kpi_type, use_internal_lgbm, tuned = _parse_lgbm_params(param)
 
     # Determine features based on kpi_type
     if kpi_type == "full":
@@ -240,29 +269,35 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
     else:
         # if kpi_type == "full_short":
         feats = full_short_kpis
-    
+
     if model_id == RFR:
         if use_internal_rfr:
-            alg_model = RFRKPIModel(
-                n_estimators=n,
-                k=5,
-                kpi_type=kpi_type,
-                kpi_features=feats,
-                random_state=42,
-                n_jobs=-1,
-            )
+            rfr_kwargs = dict(k=5, kpi_type=kpi_type, kpi_features=feats, random_state=42, n_jobs=-1)
+            if tuned:
+                best = _load_tuned_params(RFR, kpi_type)
+                rfr_kwargs.update(
+                    n_estimators=best["n_estimators"],
+                    min_samples_leaf=best["min_samples_leaf"],
+                    max_depth=best["max_depth"],
+                )
+            else:
+                rfr_kwargs["n_estimators"] = n
+            alg_model = RFRKPIModel(**rfr_kwargs)
         else:
             alg_model = RandomForestRegressor(n_estimators=n)
     elif model_id == LGBM:
         if use_internal_lgbm:
-            alg_model = LGBMKPIModel(
-                n_estimators=n,
-                k=5,
-                kpi_type=kpi_type,
-                kpi_features=feats,
-                random_state=42,
-                n_jobs=-1,
-            )
+            lgbm_kwargs = dict(k=5, kpi_type=kpi_type, kpi_features=feats, random_state=42, n_jobs=-1)
+            if tuned:
+                best = _load_tuned_params(LGBM, kpi_type)
+                lgbm_kwargs.update(
+                    n_estimators=best["n_estimators"],
+                    num_leaves=best["num_leaves"],
+                    min_child_samples=best["min_child_samples"],
+                )
+            else:
+                lgbm_kwargs["n_estimators"] = n
+            alg_model = LGBMKPIModel(**lgbm_kwargs)
         else:
             alg_model = LGBMRegressor()
     else:
@@ -291,14 +326,16 @@ def get_name(rec_model, param):
     algorithm_name = None
 
     if rec_model == LGBM:
-        n, kpi_type, use_internal_lgbm = _parse_lgbm_params(param)
-        algorithm_name = LGBM + "_" + str(n) + "_" + kpi_type
+        n, kpi_type, use_internal_lgbm, tuned = _parse_lgbm_params(param)
+        name_n = "tuned" if tuned else str(n)
+        algorithm_name = LGBM + "_" + name_n + "_" + kpi_type
         if use_internal_lgbm:
             algorithm_name += "_internal_kpis"
     else:
         # RFR (internal or external)
-        n, kpi_type, use_internal_rfr = _parse_rfr_params(param)
-        algorithm_name = RFR + "_" + str(n) + "_" + kpi_type
+        n, kpi_type, use_internal_rfr, tuned = _parse_rfr_params(param)
+        name_n = "tuned" if tuned else str(n)
+        algorithm_name = RFR + "_" + name_n + "_" + kpi_type
         if use_internal_rfr:
             algorithm_name += "_internal_kpis"
 
@@ -462,9 +499,9 @@ if __name__ == "__main__":
     use_internal_rfr = True
     use_internal_lgbm = True
     if model == RFR:
-        _, selected_kpi_type, use_internal_rfr = _parse_rfr_params(params)
+        _, selected_kpi_type, use_internal_rfr, _ = _parse_rfr_params(params)
     elif model == LGBM:
-        _, selected_kpi_type, use_internal_lgbm = _parse_lgbm_params(params)
+        _, selected_kpi_type, use_internal_lgbm, _ = _parse_lgbm_params(params)
 
     # If the number of days is 0 for the delta, we choose as minimum date one in the distant past
     # (36525 days is exactly 100 years before the established date)

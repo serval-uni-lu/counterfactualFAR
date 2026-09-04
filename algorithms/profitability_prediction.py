@@ -68,11 +68,25 @@ class ProfitabilityPrediction(Algorithm):
         if isinstance(self.model, RFRKPIModel):
             n_estimators = getattr(self.model, "n_estimators", "na")
             kpi_type = getattr(self.model, "kpi_type", "na")
+            min_samples_leaf = getattr(self.model, "min_samples_leaf", 1)
+            max_depth = getattr(self.model, "max_depth", None)
+            # Only non-default RandomForestRegressor values (i.e. an actually-tuned
+            # model) get the extended tag.
+            if min_samples_leaf != 1 or max_depth is not None:
+                return self._safe_fragment(
+                    f"n-{n_estimators}_leaf-{min_samples_leaf}_depth-{max_depth}_kpi-{kpi_type}_internal_kpis"
+                )
             return self._safe_fragment(f"n-{n_estimators}_kpi-{kpi_type}_internal_kpis")
 
         if isinstance(self.model, LGBMKPIModel):
             n_estimators = getattr(self.model, "n_estimators", "na")
             kpi_type = getattr(self.model, "kpi_type", "na")
+            num_leaves = getattr(self.model, "num_leaves", 31)
+            min_child_samples = getattr(self.model, "min_child_samples", 20)
+            if num_leaves != 31 or min_child_samples != 20:
+                return self._safe_fragment(
+                    f"n-{n_estimators}_leaves-{num_leaves}_minchild-{min_child_samples}_kpi-{kpi_type}_internal_kpis"
+                )
             return self._safe_fragment(f"n-{n_estimators}_kpi-{kpi_type}_internal_kpis")
 
         n_estimators = getattr(self.model, "n_estimators", "na")
@@ -309,16 +323,17 @@ class ProfitabilityPrediction(Algorithm):
             if self.save_for_testing:
                 os.makedirs(self._artifact_dir(), exist_ok=True)
 
-                if isinstance(self.model, RFRKPIModel):
-                    # Save raw time-series splits so CF generation scripts can build
-                    # windows and regenerate KPIs through the pipeline.
+                if isinstance(self.model, INTERNAL_KPI_MODELS):
+                    # RFR and LGBM both take raw time-series in and regenerate KPIs
+                    # internally, so save raw time-series splits (not precomputed KPI
+                    # rows) — CF generation scripts need raw prices to build windows on.
                     testing_time_series = time_series_df[
                         time_series_df[DEFAULT_TIMESTAMP_COL] >= (train_date - delta)
                     ]
                     self._save_csv_if_missing(training_time_series, self._dataset_artifact_path("training_data", train_date))
                     self._save_csv_if_missing(testing_time_series, self._dataset_artifact_path("testing_data", train_date))
                 else:
-                    # Save KPI-based splits for all other models.
+                    # External (precomputed-KPI) models: save the KPI-based splits instead.
                     self._save_csv_if_missing(training_data, self._dataset_artifact_path("training_data", train_date))
                     self._save_csv_if_missing(kpi_indicators_test, self._dataset_artifact_path("testing_data", train_date))
                 self.save_fitted_model(train_date)

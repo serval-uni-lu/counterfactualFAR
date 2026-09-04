@@ -18,6 +18,7 @@ scikit-learn = "*"
 numpy = "*"
 lightgbm = "*"
 tabulate = "*"
+optuna = "*"
 
 [dev-packages]
 
