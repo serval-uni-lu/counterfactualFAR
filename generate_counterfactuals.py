@@ -1,7 +1,9 @@
-"""Generate time-series (price-window) counterfactuals with DiCE using internal RFR .pkl.
+"""Generate time-series (price-window) counterfactuals with DiCE using an internal
+RFR or LGBM .pkl (RFRKPIModel / LGBMKPIModel — takes raw time-series in
+and regenerates KPIs internally).
 
 This script perturbs raw price-window values (`w_0 ... w_n`) and evaluates each candidate
-through the saved internal RFR pipeline by regenerating KPIs from the synthetic window.
+through the saved internal pipeline by regenerating KPIs from the synthetic window.
 """
 
 import argparse
@@ -30,6 +32,7 @@ _MODEL_TAG = "rfr_n-100_kpi-full_short_internal_kpis"
 # Last window of each experiment:
 #   exp1: 2019-08-01 -> 2020-08-28
 #   exp2: 2020-09-14 -> 2021-11-23
+
 DEFAULT_EXPERIMENT_PKLS = [
     _ARTIFACTS_DIR / _MODEL_TAG / f"profitability_recommendation_pipeline_2020-08-28_00-00-00_{_MODEL_TAG}.pkl",
     _ARTIFACTS_DIR / _MODEL_TAG / f"profitability_recommendation_pipeline_2021-11-23_00-00-00_{_MODEL_TAG}.pkl",
@@ -43,15 +46,15 @@ MAX_DICE_SECONDS = 300  # raise RuntimeError if DiCE predict() is still running 
 
 
 def _load_model(model_path: Path):
-    """Load an internal RFR pipeline object from pickle."""
+    """Load an internal KPI-model pipeline object (RFRKPIModel or LGBMKPIModel) from pickle."""
 
     with open(model_path, "rb") as handle:
         model = pickle.load(handle)
 
     if not hasattr(model, "_generate_kpis_df"):
-        raise ValueError("Loaded .pkl does not expose _generate_kpis_df (expected internal RFR model)")
+        raise ValueError("Loaded .pkl does not expose _generate_kpis_df (expected an internal RFR/LGBM model)")
     if not hasattr(model, "model"):
-        raise ValueError("Loaded .pkl does not expose fitted RF model at .model")
+        raise ValueError("Loaded .pkl does not expose a fitted regressor at .model")
     if not hasattr(model, "kpi_features") or not model.kpi_features:
         raise ValueError("Loaded .pkl has no kpi_features configured")
     return model
@@ -135,8 +138,10 @@ def build_window_dataset(
     return pd.DataFrame(rows).sort_values([DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL]).reset_index(drop=True)
 
 
-class RFRPKLWindowWrapper:
-    """DiCE-compatible predictor: price window -> internal KPI generation -> RF prediction.
+class InternalKPIWindowWrapper:
+    """DiCE-compatible predictor: price window -> internal KPI generation -> regressor prediction.
+    Works with any internal KPI model (RFRKPIModel, LGBMKPIModel) that takes raw
+    time-series in and regenerates KPIs itself.
 
     Query context (asset, timestamp, panel, series) is stored in thread-local storage so
     that multiple queries can be evaluated concurrently without state conflicts.
@@ -239,7 +244,7 @@ class RFRPKLWindowWrapper:
         self._thread_local.dice_deadline = time.time() + MAX_DICE_SECONDS
 
     def _predict_from_ts_context(self, ts_df: pd.DataFrame, context_item, context_timestamp, model_obj=None) -> float:
-        """Score one contextual raw time-series frame via the exact internal RFR path."""
+        """Score one contextual raw time-series frame via the exact internal model path."""
         model_obj = self._get_thread_model() if model_obj is None else model_obj
         try:
             all_preds = np.asarray(model_obj.predict(ts_df)).reshape(-1)
@@ -247,14 +252,14 @@ class RFRPKLWindowWrapper:
             message = str(error)
             if "Found array with 0 sample(s)" in message:
                 raise ValueError(
-                    "Internal RFR produced no KPI rows for this context. "
+                    "Internal model produced no KPI rows for this context. "
                     "With test-only history, select a later --query-index or use a dataset with longer test history."
                 ) from error
             raise
 
         kpis_df = getattr(getattr(model_obj, "transformer", None), "last_kpis_df_", None)
         if kpis_df is None or kpis_df.empty:
-            raise ValueError("Internal RFR prediction did not expose KPI rows via transformer.last_kpis_df_")
+            raise ValueError("Internal model prediction did not expose KPI rows via transformer.last_kpis_df_")
         kpis_df = kpis_df.reset_index(drop=True)
 
         if context_timestamp is not None:
@@ -277,7 +282,7 @@ class RFRPKLWindowWrapper:
             selected = kpis_df[kpis_df[DEFAULT_ITEM_COL] == context_item].tail(1)
 
         if selected.empty:
-            raise ValueError("Unable to locate KPI row for contextual internal RFR prediction")
+            raise ValueError("Unable to locate KPI row for contextual internal model prediction")
 
         selected_idx = int(selected.index[-1])
         if selected_idx < 0 or selected_idx >= len(all_preds):
@@ -515,7 +520,7 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
         raise ValueError("No valid query windows in testing CSV")
 
     n_workers = os.cpu_count() if int(args.n_jobs) == -1 else max(1, int(args.n_jobs))
-    wrapper = RFRPKLWindowWrapper(model, window_cols, full_time_series=full_history, n_jobs=1)
+    wrapper = InternalKPIWindowWrapper(model, window_cols, full_time_series=full_history, n_jobs=1)
     dice_model = dice_ml.Model(model=wrapper, backend="sklearn", model_type="regressor")
 
     out_cf.parent.mkdir(parents=True, exist_ok=True)
@@ -1024,7 +1029,7 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate RFR counterfactuals for the last window of each experiment (or custom pkls)"
+        description="Generate counterfactuals (RFR or LGBM internal pipeline pkl) for the last window of each experiment, or custom pkls"
     )
     parser.add_argument(
         "--model-pkl",
@@ -1033,9 +1038,11 @@ def main():
         default=DEFAULT_EXPERIMENT_PKLS,
         metavar="PKL",
         help=(
-            "One or more pkl paths to process. Training/testing CSVs are auto-derived "
-            "from the pkl filename. Defaults to the last window of each experiment "
-            "(2020-08-28 for exp1, 2021-11-23 for exp2)."
+            "One or more pkl paths to process — an internal RFR or LGBM pipeline pkl, "
+            "either works. Training/testing CSVs are auto-derived from the pkl filename. "
+            "Defaults to the RFR flagship's last window of each experiment "
+            "(2020-08-28 for exp1, 2021-11-23 for exp2); pass an LGBM pkl explicitly to "
+            "run against that instead."
         ),
     )
     parser.add_argument("--asset-id", type=str, default=None, help="Optional single asset to process")
