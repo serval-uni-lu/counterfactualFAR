@@ -65,10 +65,15 @@ Pass `n_estimators` and/or `kpi_type` directly:
 python3 run_recommendation.py FAR-Trans-Data results rfr 100 short
 ```
 
-`tabpfn` is internal-only and only takes a `kpi_type` parameter — no `n_estimators`, and no `tuned` mode.
+`tabpfn` is internal-only and takes a `kpi_type` parameter and, optionally, a sample fraction — no `n_estimators`, and no `tuned` mode.
 
 ```bash
 python3 run_recommendation.py FAR-Trans-Data results tabpfn
+```
+Pass a fraction in `(0, 1]` as an extra model parameter to cap the widnow size — sampled proportionally per asset (min. 1 row/asset), so every asset stays represented. 
+
+```bash
+python3 run_recommendation.py FAR-Trans-Data results tabpfn full_short 0.25
 ```
 
 **Internal vs. external KPI generation:**
