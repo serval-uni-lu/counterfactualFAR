@@ -278,6 +278,19 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def stratified_sample_by_group(features_df, target_series, frac, group_col=DEFAULT_ITEM_COL, seed=42):
+    """Proportional per-group subsample (min 1 row/group) so a size-reducing
+    sample stays diversified across groups instead of a flat random draw
+    that could drop low-volume groups entirely."""
+    rng = np.random.RandomState(seed)
+    sampled_index = []
+    for _, group in features_df.groupby(group_col):
+        k = min(len(group), max(1, round(len(group) * frac)))
+        sampled_index.extend(rng.choice(group.index.to_numpy(), size=k, replace=False))
+    sampled_index = pd.Index(sampled_index)
+    return features_df.loc[sampled_index], target_series.loc[sampled_index]
+
+
 def str2bool(v):
     """Convert a string to a bool variable."""
     if isinstance(v, bool):

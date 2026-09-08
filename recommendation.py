@@ -105,7 +105,7 @@ def _parse_rfr_params(params):
             kpi_type = token_lower
             continue
 
-        if token_lower in {"legacy", "external"}:
+        if token_lower == "external":
             use_internal = False
             continue
 
@@ -135,7 +135,7 @@ def _parse_lgbm_params(params):
             kpi_type = token_lower
             continue
 
-        if token_lower in {"legacy", "external"}:
+        if token_lower == "external":
             use_internal = False
             continue
 
@@ -150,9 +150,13 @@ def _parse_lgbm_params(params):
 
 
 def _parse_tabpfn_params(params):
-    """TabPFN has no parameters. Reject anything else explicitly
-    rather than silently ignoring it."""
+    """TabPFN accepts a kpi_type and, optionally, a training/generalization-metrics
+    sample fraction (a bare number in (0, 1], e.g. "0.25") — applied to both the
+    actual fit (bounds the GPU context TabPFN trains/predicts on) and the
+    generalization-metrics diagnostic, per-asset stratified. 
+    """
     kpi_type = "full_short"
+    sample_pct = None
 
     for raw in params or []:
         token = str(raw).strip()
@@ -164,12 +168,22 @@ def _parse_tabpfn_params(params):
             kpi_type = token_lower
             continue
 
+        try:
+            value = float(token)
+        except ValueError:
+            value = None
+
+        if value is not None and 0 < value <= 1:
+            sample_pct = value
+            continue
+
         raise ValueError(
             f"Unsupported tabpfn parameter: '{token}'. Only a kpi_type "
-            f"({sorted(KPI_TYPES)}) is supported for tabpfn."
+            f"({sorted(KPI_TYPES)}) or a sample fraction in (0, 1] is "
+            f"supported for tabpfn."
         )
 
-    return kpi_type
+    return kpi_type, sample_pct
 
 
 def _load_tuned_params(model_id, kpi_type):
@@ -326,13 +340,14 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
     use_internal_lgbm = True
     tuned = False
     n = 20
+    sample_pct = None
 
     if model_id == RFR:
         n, kpi_type, use_internal_rfr, tuned = _parse_rfr_params(param)
     elif model_id == LGBM:
         n, kpi_type, use_internal_lgbm, tuned = _parse_lgbm_params(param)
     elif model_id == TABPFN:
-        kpi_type = _parse_tabpfn_params(param)
+        kpi_type, sample_pct = _parse_tabpfn_params(param)
 
     # Determine features based on kpi_type
     if kpi_type == "full":
@@ -376,7 +391,10 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
         else:
             alg_model = LGBMRegressor()
     elif model_id == TABPFN:
-        alg_model = TabPFNKPIModel(k=5, kpi_type=kpi_type, kpi_features=feats, random_state=42)
+        alg_model = TabPFNKPIModel(
+            k=5, kpi_type=kpi_type, kpi_features=feats, random_state=42,
+            sample_pct=sample_pct,
+        )
     else:
         raise ValueError(f"Unsupported model identifier: {model_id}")
 
@@ -409,8 +427,10 @@ def get_name(rec_model, param):
         if use_internal_lgbm:
             algorithm_name += "_internal_kpis"
     elif rec_model == TABPFN:
-        kpi_type = _parse_tabpfn_params(param)
+        kpi_type, sample_pct = _parse_tabpfn_params(param)
         algorithm_name = TABPFN + "_" + kpi_type + "_internal_kpis"
+        if sample_pct is not None:
+            algorithm_name += "_tabpfn_sample" + str(sample_pct)
     else:
         # RFR (internal or external)
         n, kpi_type, use_internal_rfr, tuned = _parse_rfr_params(param)

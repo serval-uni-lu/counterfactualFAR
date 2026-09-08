@@ -12,11 +12,15 @@ import os
 import re
 import fcntl
 import pickle
+import gc
 
 import datetime
 import random
+import numpy as np
 import pandas as pd
+import torch
 from utils.constants import DEFAULT_TIMESTAMP_COL, DEFAULT_ITEM_COL, DEFAULT_USER_COL, DEFAULT_RATING_COL
+from utils.common_util import stratified_sample_by_group
 
 from algorithms.algorithm import Algorithm
 from algorithms.lgbm_kpi_model import LGBMKPIModel
@@ -94,6 +98,9 @@ class ProfitabilityPrediction(Algorithm):
 
         if isinstance(self.model, TabPFNKPIModel):
             kpi_type = getattr(self.model, "kpi_type", "na")
+            sample_pct = getattr(self.model, "sample_pct", None)
+            if sample_pct is not None:
+                return self._safe_fragment(f"kpi-{kpi_type}_internal_kpis_tabpfn_sample{sample_pct}")
             return self._safe_fragment(f"kpi-{kpi_type}_internal_kpis")
 
         n_estimators = getattr(self.model, "n_estimators", "na")
@@ -120,10 +127,19 @@ class ProfitabilityPrediction(Algorithm):
         avoiding a full KPI regeneration pass. Works for RFR, LGBM, and external sklearn models.
         Returns a dict with R², RMSE, MAE on train and test, plus the generalization gap.
         """
-        import numpy as np
         from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
         try:
+            sample_pct = getattr(self.model, "sample_pct", None)
+            if isinstance(self.model, TabPFNKPIModel) and sample_pct is not None:
+                seed = getattr(self.model, "random_state", 42)
+                kpi_train_feats, train_targets = stratified_sample_by_group(
+                    kpi_train_feats, train_targets, sample_pct, seed=seed
+                )
+                kpi_test_feats, test_targets = stratified_sample_by_group(
+                    kpi_test_feats, test_targets, sample_pct, seed=seed
+                )
+
             X_train = kpi_train_feats[self.indicators].astype(float)
             X_test = kpi_test_feats[self.indicators].astype(float)
             y_train = train_targets.values.astype(float)
@@ -321,7 +337,7 @@ class ProfitabilityPrediction(Algorithm):
             self.is_fitted = True
 
             self.generalization_metrics_ = self._compute_generalization_metrics(
-                kpi_indicators_features,
+                kpi_indicators[aux_list[:-1]],  # features + item/timestamp, no target
                 goals,
                 kpi_indicators_test[aux_list_test[:-1]],  # features + item/timestamp, no target
                 kpi_indicators_test["target"],
@@ -345,6 +361,15 @@ class ProfitabilityPrediction(Algorithm):
                     self._save_csv_if_missing(kpi_indicators_test, self._dataset_artifact_path("testing_data", train_date))
                 self.save_fitted_model(train_date)
 
+            self._release_gpu_memory()
+
+    def _release_gpu_memory(self):
+        # TabPFN keeps the training context resident on the GPU between windows;
+        # without this, per-window allocations accumulate across the date loop
+        # and eventually trigger CUDA OOM (seen when computing generalization metrics).
+        if isinstance(self.model, TabPFNKPIModel) and torch.cuda.is_available():
+            gc.collect()
+            torch.cuda.empty_cache()
 
     def save_fitted_model(self, train_date):
         self._validate_internal_model_contract()
