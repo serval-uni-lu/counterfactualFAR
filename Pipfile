@@ -19,8 +19,8 @@ numpy = "*"
 lightgbm = "*"
 tabulate = "*"
 optuna = "*"
-tabpfn = "*"
 codecarbon = "*"
+tabpfn = "==6.4.1"
 
 [dev-packages]
 
