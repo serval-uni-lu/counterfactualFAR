@@ -344,22 +344,37 @@ class ProfitabilityPrediction(Algorithm):
             )
 
             if self.save_for_testing:
-                os.makedirs(self._artifact_dir(), exist_ok=True)
-
-                if isinstance(self.model, INTERNAL_KPI_MODELS):
-                    # RFR and LGBM both take raw time-series in and regenerate KPIs
-                    # internally, so save raw time-series splits (not precomputed KPI
-                    # rows) — CF generation scripts need raw prices to build windows on.
-                    testing_time_series = time_series_df[
-                        time_series_df[DEFAULT_TIMESTAMP_COL] >= (train_date - delta)
-                    ]
-                    self._save_csv_if_missing(training_time_series, self._dataset_artifact_path("training_data", train_date))
-                    self._save_csv_if_missing(testing_time_series, self._dataset_artifact_path("testing_data", train_date))
+                if isinstance(self.model, TabPFNKPIModel):
+                    # Artifact saving disabled for TabPFN — raw train/test time-series
+                    # dumps and the fitted pkl are large and currently unused downstream
+                    # (no counterfactual generation or membership-inference audit targets
+                    # tabpfn). Left commented rather than removed in case that changes.
+                    #
+                    # os.makedirs(self._artifact_dir(), exist_ok=True)
+                    # testing_time_series = time_series_df[
+                    #     time_series_df[DEFAULT_TIMESTAMP_COL] >= (train_date - delta)
+                    # ]
+                    # self._save_csv_if_missing(training_time_series, self._dataset_artifact_path("training_data", train_date))
+                    # self._save_csv_if_missing(testing_time_series, self._dataset_artifact_path("testing_data", train_date))
+                    # self.save_fitted_model(train_date)
+                    pass
                 else:
-                    # External (precomputed-KPI) models: save the KPI-based splits instead.
-                    self._save_csv_if_missing(training_data, self._dataset_artifact_path("training_data", train_date))
-                    self._save_csv_if_missing(kpi_indicators_test, self._dataset_artifact_path("testing_data", train_date))
-                self.save_fitted_model(train_date)
+                    os.makedirs(self._artifact_dir(), exist_ok=True)
+
+                    if isinstance(self.model, INTERNAL_KPI_MODELS):
+                        # RFR and LGBM both take raw time-series in and regenerate KPIs
+                        # internally, so save raw time-series splits (not precomputed KPI
+                        # rows) — CF generation scripts need raw prices to build windows on.
+                        testing_time_series = time_series_df[
+                            time_series_df[DEFAULT_TIMESTAMP_COL] >= (train_date - delta)
+                        ]
+                        self._save_csv_if_missing(training_time_series, self._dataset_artifact_path("training_data", train_date))
+                        self._save_csv_if_missing(testing_time_series, self._dataset_artifact_path("testing_data", train_date))
+                    else:
+                        # External (precomputed-KPI) models: save the KPI-based splits instead.
+                        self._save_csv_if_missing(training_data, self._dataset_artifact_path("training_data", train_date))
+                        self._save_csv_if_missing(kpi_indicators_test, self._dataset_artifact_path("testing_data", train_date))
+                    self.save_fitted_model(train_date)
 
             self._release_gpu_memory()
 
