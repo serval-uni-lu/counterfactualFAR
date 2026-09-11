@@ -2,6 +2,8 @@
 import os
 import sys
 
+from recommendation import _parse_tabpfn_params
+
 __author__ = "Javier Sanz-Cruzado (javier.sanz-cruzadopuig@glasgow.ac.uk)"
 
 if __name__ == "__main__":
@@ -74,6 +76,11 @@ if __name__ == "__main__":
         print("Starting", model_config[0], "for time horizon of", date[4], "month(s)")
 
         directory = os.path.join(date[5], model_config[1])
+        if model_config[0] == "tabpfn":
+            # Nest tabpfn results by sample fraction (results/tabpfn/sample{pct}/...)
+            _, sample_pct = _parse_tabpfn_params(model_config[2:])
+            sample_tag = f"sample{sample_pct}" if sample_pct is not None else "sample1.0"
+            directory = os.path.join(directory, sample_tag)
         os.makedirs(directory, exist_ok=True)
 
         # Build command
