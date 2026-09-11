@@ -85,7 +85,7 @@ if __name__ == "__main__":
 
         # Build command
         exec_code = [
-            "python3", "./recommendation.py",
+            sys.executable, "./recommendation.py",
             interactions_file,
             time_series,
             "range",         # date_format choice
