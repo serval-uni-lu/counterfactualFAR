@@ -660,37 +660,54 @@ def main():
 
     for model_name in model_folders:
         model_folder = os.path.join(RESULTS_ROOT, model_name)
-        run_prefixes = discover_metric_prefixes(model_folder)
         run_stats_tables = []
 
-        if not run_prefixes:
+        # Some models (e.g. tabpfn) keep no metrics directly under the model folder,
+        # only inside per-run subfolders (e.g. sample size: tabpfn/sample0.05/,
+        # tabpfn/sample0.2/) — fall back to searching those when the top level is empty.
+        search_folders = [model_folder]
+        if not discover_metric_prefixes(model_folder):
+            subfolders = [
+                os.path.join(model_folder, name)
+                for name in sorted(os.listdir(model_folder))
+                if os.path.isdir(os.path.join(model_folder, name))
+            ]
+            if subfolders:
+                search_folders = subfolders
+
+        found_any = False
+        for search_folder in search_folders:
+            run_prefixes = discover_metric_prefixes(search_folder)
+
+            for run_prefix in run_prefixes:
+                try:
+                    all_metrics, metric_files = load_window_metrics(search_folder, run_prefix)
+                except ValueError:
+                    print(f"Skipping {run_prefix}: no matching per-window metrics files")
+                    continue
+
+                found_any = True
+                full_stats = compute_full_stats_per_metric(all_metrics)
+                output_file = os.path.join(model_stats_dir, f"{run_prefix}.csv")
+                full_stats.to_csv(output_file, index=False)
+                run_stats_tables.append((run_prefix, full_stats))
+                all_run_stats_tables.append((run_prefix, full_stats))
+                all_run_metrics.append((run_prefix, all_metrics))
+
+                # Per-experiment stats (including unclassified if present)
+                for exp_label, exp_df in all_metrics.groupby("experiment"):
+                    exp_stats = compute_full_stats_per_metric(exp_df)
+                    exp_output_file = os.path.join(model_stats_dir, f"{run_prefix}_{exp_label}.csv")
+                    exp_stats.to_csv(exp_output_file, index=False)
+
+                print(f"Model run: {run_prefix}")
+                print(f"  Windows used: {len(metric_files)}")
+                print(f"  Saved stats: {output_file}")
+                print(f"  Saved per-experiment stats in: {model_stats_dir}")
+
+        if not found_any:
             print(f"Skipping {model_name}: no matching per-window metrics files")
             continue
-
-        for run_prefix in run_prefixes:
-            try:
-                all_metrics, metric_files = load_window_metrics(model_folder, run_prefix)
-            except ValueError:
-                print(f"Skipping {run_prefix}: no matching per-window metrics files")
-                continue
-
-            full_stats = compute_full_stats_per_metric(all_metrics)
-            output_file = os.path.join(model_stats_dir, f"{run_prefix}.csv")
-            full_stats.to_csv(output_file, index=False)
-            run_stats_tables.append((run_prefix, full_stats))
-            all_run_stats_tables.append((run_prefix, full_stats))
-            all_run_metrics.append((run_prefix, all_metrics))
-
-            # Per-experiment stats (including unclassified if present)
-            for exp_label, exp_df in all_metrics.groupby("experiment"):
-                exp_stats = compute_full_stats_per_metric(exp_df)
-                exp_output_file = os.path.join(model_stats_dir, f"{run_prefix}_{exp_label}.csv")
-                exp_stats.to_csv(exp_output_file, index=False)
-
-            print(f"Model run: {run_prefix}")
-            print(f"  Windows used: {len(metric_files)}")
-            print(f"  Saved stats: {output_file}")
-            print(f"  Saved per-experiment stats in: {model_stats_dir}")
 
         print(f"  Saved stats for model group: {model_name}")
 
