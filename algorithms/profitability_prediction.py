@@ -10,7 +10,6 @@
 
 import os
 import re
-import fcntl
 import pickle
 import gc
 
@@ -36,8 +35,7 @@ class ProfitabilityPrediction(Algorithm):
     Algorithm that predicts the future profitability of assets. Ranks the assets according to that value.
     """
 
-    def __init__(self, model, data, months, indicators, train_examples_per_asset, save_for_testing=False,
-                 training_sizes_path=None):
+    def __init__(self, model, data, months, indicators, train_examples_per_asset, save_for_testing=False):
         """
         Configures the profitability prediction model.
         :param model: the model to train.
@@ -55,7 +53,6 @@ class ProfitabilityPrediction(Algorithm):
         self.train_examples_per_asset = train_examples_per_asset
         self.is_fitted = False
         self.save_for_testing = save_for_testing
-        self.training_sizes_path = training_sizes_path
 
     def _model_tag(self):
         if isinstance(self.model, RFRKPIModel):
@@ -194,40 +191,6 @@ class ProfitabilityPrediction(Algorithm):
         if not os.path.exists(path):
             df.to_csv(path, index=False)
 
-    def _save_training_size(self, train_date, train_rows):
-        if self.training_sizes_path is None:
-            return
-
-        out_path = self.training_sizes_path
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-
-        row = {
-            "model": self._model_tag(),
-            "model_params": self._model_param_tag(),
-            "rec_date": pd.to_datetime(train_date).strftime("%Y-%m-%d"),
-            "train_rows": int(train_rows),
-        }
-
-        lock_path = out_path + ".lock"
-        with open(lock_path, "w") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-
-            if os.path.exists(out_path):
-                current = pd.read_csv(out_path)
-            else:
-                current = pd.DataFrame(columns=["model", "model_params", "rec_date", "train_rows"])
-
-            exists_mask = (
-                (current["model"] == row["model"])
-                & (current["model_params"] == row["model_params"])
-                & (current["rec_date"] == row["rec_date"])
-            ) if len(current) > 0 else pd.Series([], dtype=bool)
-
-            if len(current) == 0 or not exists_mask.any():
-                updated = pd.concat([current, pd.DataFrame([row])], ignore_index=True)
-                updated = updated.sort_values(["model", "model_params", "rec_date"]).reset_index(drop=True)
-                updated.to_csv(out_path, index=False)
-
     def _generate_internal_kpis(self, time_series_df):
         if isinstance(self.model, INTERNAL_KPI_MODELS):
             return self.model._generate_kpis_df(time_series_df)
@@ -314,7 +277,6 @@ class ProfitabilityPrediction(Algorithm):
         kpi_indicators_test = kpi_indicators_test.dropna()
 
         if kpi_indicators_features.shape[0] > 0:
-            self._save_training_size(train_date, kpi_indicators_features.shape[0])
             # Internal models are trained from raw time-series + aligned targets.
             if isinstance(self.model, INTERNAL_KPI_MODELS):
                 training_time_series = time_series_df[time_series_df[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]  # Internal-model train split over raw time-series (same temporal cutoff as KPI train rows)
