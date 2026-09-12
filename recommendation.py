@@ -18,6 +18,7 @@ import argparse
 
 import numpy as np
 import pandas as pd
+import wandb
 from utils.constants import DEFAULT_TIMESTAMP_COL, DEFAULT_ITEM_COL, DEFAULT_RATING_COL, DEFAULT_USER_COL
 from codecarbon import EmissionsTracker
 from lightgbm import LGBMRegressor
@@ -303,6 +304,14 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
         f.write(key + "\t" + str(val) + "\n")
     f.close()
 
+    wandb.log({
+        **{key: val[1] for key, val in metric_res.items()},
+        **timing_metrics,
+        **energy_metrics,
+        **gen_metrics,
+        "rec_date": str(recomm_date.date()),
+    })
+
 
     cust_metric_df = None
     # Output the metrics by customer
@@ -398,10 +407,8 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
     else:
         raise ValueError(f"Unsupported model identifier: {model_id}")
 
-    training_sizes_path = os.path.join(os.path.dirname(output_dir), "training_sizes.csv")
     algorithm = ProfitabilityPrediction(alg_model, financial_data, num_months, feats, -1,
-                                        save_for_testing=save_for_testing,
-                                        training_sizes_path=training_sizes_path)
+                                        save_for_testing=save_for_testing)
     file_name = os.path.join(output_dir, file)
     test(algorithm, eval_metrics, file_name, recommendation_date, financial_data.users)
 
@@ -664,6 +671,25 @@ if __name__ == "__main__":
         print("ERROR: Invalid parameters")
         exit(-1)
 
+    # One run per (experiment date-range, model config) invocation — matches how
+    # run_recommendation.py/the slurm scripts shell out one recommendation.py process
+    # per config, so progress across this process's windows can be watched live.
+    wandb.init(
+        project=os.environ.get("WANDB_PROJECT", "counterfactualFAR"),
+        group=f_name,
+        name=f"{f_name}_{min_date:%Y-%m-%d}_{max_date:%Y-%m-%d}",
+        config={
+            "model": model,
+            "params": params,
+            "kpi_type": selected_kpi_type,
+            "min_date": min_date.isoformat(),
+            "max_date": max_date.isoformat(),
+            "num_splits": num_splits,
+            "num_future": num_future,
+            "months": months_term,
+        },
+    )
+
     # Then, we generate the dates for this.
     for i in range(0, len(dates)):
         if not os.path.exists(os.path.join(directory, f_name)):
@@ -715,3 +741,5 @@ if __name__ == "__main__":
         # CPUs without joblib's nested-parallelism cap inside a subprocess.
         regressor(model, params, splitted_data, rec_date, metrics, directory, alg_name, months_term,
                   save_for_testing)
+
+    wandb.finish()

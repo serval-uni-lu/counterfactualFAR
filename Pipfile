@@ -21,6 +21,7 @@ tabulate = "*"
 optuna = "*"
 codecarbon = "*"
 tabpfn = "==6.4.1"
+wandb = "*"
 
 [dev-packages]
 
