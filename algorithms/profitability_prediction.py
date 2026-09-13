@@ -52,7 +52,8 @@ class ProfitabilityPrediction(Algorithm):
         self.model = model
         self.train_examples_per_asset = train_examples_per_asset
         self.is_fitted = False
-        self.save_for_testing = save_for_testing
+        # do not create an artifacts_for_counterfactuals/ directory for a TabPFN
+        self.save_for_testing = save_for_testing and not isinstance(model, TabPFNKPIModel)
 
     def _model_tag(self):
         if isinstance(self.model, RFRKPIModel):
