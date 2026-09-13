@@ -5,8 +5,8 @@ just the one that wins on a single window) for `recommendation.py`'s "tuned"
 mode to pick up.
 
 Usage (run from anywhere; repo root is added to sys.path below):
-    python3 algorithms/tune_hyperparams.py <dataset_path> rfr [--n-trials 20] [--num-folds 4] [--robustness-lambda 0.5] [--calibration-months 3]
-    python3 algorithms/tune_hyperparams.py <dataset_path> lgbm [--n-trials 20] [--num-folds 4] [--robustness-lambda 0.5] [--calibration-months 3]
+    python3 algorithms/tune_hyperparams.py <dataset_path> rfr [--n-trials 20] [--num-folds 4] [--robustness-lambda 0.5] [--calibration-months 3] [--min-train-days 75]
+    python3 algorithms/tune_hyperparams.py <dataset_path> lgbm [--n-trials 20] [--num-folds 4] [--robustness-lambda 0.5] [--calibration-months 3] [--min-train-days 75]
 
 Output:
     results/hyperparam_selection/{model}_full_short_optuna_results.csv        (every trial, incl. per-fold scores)
@@ -110,6 +110,20 @@ def _fold_origins(data, kpi_available_from, cutoff_date, months, num_folds, min_
     if num_folds == 1:
         return [_snap_to_trading_day(latest_origin, trading_dates)]
 
+    span_days = (latest_origin - earliest_origin).days
+    min_days_between_folds = 14
+    if span_days < min_days_between_folds * (num_folds - 1):
+        raise ValueError(
+            f"Calibration folds would be crammed into only {span_days} days "
+            f"({earliest_origin.date()} to {latest_origin.date()}) for {num_folds} folds — "
+            f"consecutive origins would be ~{span_days / (num_folds - 1):.1f} days apart, "
+            f"nearly the same training data repeated {num_folds} times. Fix by lowering "
+            f"--calibration-months (shrinks the exclusion buffer on both ends) while raising "
+            f"--min-train-days by the same number of days you lowered the buffer, to keep "
+            f"earliest_origin anchored at the same (already data-validated) date — see "
+            f"--calibration-months/--min-train-days help text for the current recommended pair."
+        )
+
     step = (latest_origin - earliest_origin) / (num_folds - 1)
     raw_origins = [(earliest_origin + i * step).normalize() for i in range(num_folds)]
     return [_snap_to_trading_day(o, trading_dates) for o in raw_origins]
@@ -195,21 +209,14 @@ def main():
                          help="Weight on across-fold std dev in the objective (mean - lambda*std): "
                               "higher favors configs that are stable across folds over ones that are "
                               "merely best on average.")
-    parser.add_argument("--min-train-days", type=int, default=90,
-                         help="Minimum REAL training history (after KPI rows actually start existing, see "
-                              "_kpi_available_from) required for the earliest calibration fold, on top of the "
-                              "months*30-day exclusion buffer. With calibration_months=3 and this dataset's "
-                              "real ~308-day pre-cutoff runway, 90 leaves ~38 days to spread multiple folds "
-                              "across (raising it shrinks that spread further; 180 is already infeasible here). "
-                              "90 was chosen empirically: at 60, the earliest fold (2019-02-24) had zero assets "
-                              "survive AssetWithTestPrice filtering entirely — not a KPI-warmup shortfall but "
-                              "real interaction-data sparsity this early in the dataset's timeline, which "
-                              "calendar arithmetic alone can't predict. 90 pushes past that specific edge.")
+    parser.add_argument("--min-train-days", type=int, default=75,
+                         help="Minimum REAL training history required for the earliest calibration fold, on top of the "
+                              "months*30-day exclusion buffer.")
     parser.add_argument("--calibration-months", type=int, default=3,
-                         help="Horizon used for calibration folds only (not the real deployment horizon, "
-                              "DEPLOYMENT_MONTHS=6) — controls both the internal exclusion buffer and the "
-                              "validation window, so a shorter value frees up more usable pre-cutoff history "
-                              "for multiple time-separated folds. See module docstring for the tradeoff.")
+                         help="Horizon used for calibration folds only. Ideally this would equal the real "
+                              "deployment horizon (DEPLOYMENT_MONTHS=6). But this dataset's pre-cutoff "
+                              "runway (~308 days) is too short for calibration_months=6: the exclusion buffer "
+                              "(months*30 days, counted at both ends) alone exceeds it.")
     args = parser.parse_args()
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
