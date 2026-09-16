@@ -159,7 +159,7 @@ def _make_objective(model_id, folds, robustness_lambda, calibration_months):
                 )
         else:
             n_estimators = trial.suggest_int("n_estimators", 10, 500)
-            num_leaves = trial.suggest_int("num_leaves", 1, 100)
+            num_leaves = trial.suggest_int("num_leaves", 2, 100)
             min_child_samples = trial.suggest_int("min_child_samples", 5, 100)
 
             def make_model():
