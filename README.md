@@ -98,16 +98,16 @@ python3 recommendation.py FAR-Trans-Data prices range 2019-08-01 2021-02-26 28 1
 
 ### 2b. Hyperparameter Tuning (Optuna)
 
-Search RFR/LGBM hyperparameters with Optuna against a single fixed window — exp1's first split (`2019-08-01`) — then save the best config for the `tuned` model parameter to pick up.
+Search RFR/LGBM hyperparameters with Optuna against several **expanding-window calibration folds**, then save the config that's stable across those folds for the `tuned` model parameter to pick up.
 
 ```bash
 python3 algorithms/tune_hyperparams.py FAR-Trans-Data rfr --n-trials 20
 python3 algorithms/tune_hyperparams.py FAR-Trans-Data lgbm --n-trials 20
 ```
 
-- Objective: `monthly_prof@10` (ROI) on that one window, maximized.
-- Search space: `n_estimators`, `min_samples_leaf`, `max_depth` for RFR; `n_estimators`, `num_leaves`, `min_child_samples` for LGBM.
-- KPIs for the window are computed once up front (not per trial), so each trial only pays for the regressor fit itself.
+- Objective: `mean(fold_scores) - robustness_lambda * std(fold_scores)`, maximized, where each fold's score is `monthly_prof@10` (ROI) on that fold's own held-out validation window.
+- Folds are expanding windows whose validation periods all end at or before `2019-08-01`. This keeps every calibration fold strictly separate from every window whose result gets reported, so the tuning process can never leak into a "test" result.
+- The calibration horizon (`--calibration-months`, default `3`) is deliberately shorter than the real deployment horizon (6 months, `DEPLOYMENT_MONTHS`) because this dataset's pre-`2019-08-01` history isn't long enough to fit one 6-month-horizon fold. 
 
 Apply the saved best params across all windows in both experiments:
 
@@ -133,13 +133,13 @@ python3 process_results.py model
 By default, runs the last window of each experiment (exp1: `2020-08-28`, exp2: `2021-11-23`). Training/testing CSVs and output paths are auto-derived from the model pickle filename.
 
 ```bash
-python3 generate_rfr_counterfactuals_pkl.py
+python3 generate_counterfactuals.py
 ```
 
 Run for a specific window:
 
 ```bash
-python3 generate_rfr_counterfactuals_pkl.py \
+python3 generate_counterfactuals.py \
   --model-pkl artifacts_for_counterfactuals/rfr_n-100_kpi-full_short_internal_kpis/profitability_recommendation_pipeline_2020-08-28_00-00-00_rfr_n-100_kpi-full_short_internal_kpis.pkl
 ```
 
@@ -170,3 +170,36 @@ Plot the factual vs CF price window for a specific asset and query:
 ```bash
 python3 process_results.py cf --asset-id <ASSET_ID> --query-index <N>
 ```
+
+---
+
+### 6. Membership Inference Attacks
+
+The valid test-period rows are split 50/50 (stratified per asset): one half is audited
+as non-members, the other half is held out purely as the population reference used by
+the population attack. Members are then downsampled to match the non-member count, so
+both classes are balanced. `loss.py` and `population_attack.py` audit the
+same member/non-member rows.
+
+**LOSS attack** — a sample is predicted "member" when its loss is unusually low
+(Yeom et al.):
+
+```bash
+python3 membership_inference/loss.py --model rfr_n-100_kpi-full_short_internal_kpis --dates 2020-08-28,2021-11-23
+```
+
+**Population attack** — each audited sample is scored by where its loss falls within
+the population loss distribution:
+
+```bash
+python3 membership_inference/population_attack.py --model rfr_n-100_kpi-full_short_internal_kpis
+```
+
+Output per date: `member_scores.csv`, `nonmember_scores.csv` (plus `population_scores.csv`
+for the population attack), and `metrics.json` (ROC-AUC, accuracy at the best threshold,
+attack advantage).
+
+Each run also saves plots to `stats/membership_inference/{loss_attack,population_attack}/<model>/`:
+an ROC curve (linear + log-log) and a loss-distribution histogram per date, a
+percentile-rank histogram per date for the population attack, and (when more than one
+date is run) an AUC/attack-advantage trend plot across dates.
