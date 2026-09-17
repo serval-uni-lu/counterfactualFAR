@@ -282,10 +282,12 @@ class ProfitabilityPrediction(Algorithm):
             if isinstance(self.model, INTERNAL_KPI_MODELS):
                 training_time_series = time_series_df[time_series_df[DEFAULT_TIMESTAMP_COL] < (train_date - delta)]  # Internal-model train split over raw time-series (same temporal cutoff as KPI train rows)
                 train_targets = training_data[[DEFAULT_ITEM_COL, DEFAULT_TIMESTAMP_COL, "target"]]
-                artifact_prefix = os.path.join(
-                    self._artifact_dir(),
-                    f"kpis_train_{self._dataset_artifact_label(train_date)}_{self._model_tag()}_{self._model_param_tag()}",
-                ) if self.save_for_testing else None
+                # kpis_train_* no longer stored in artifacts_for_counterfactuals.
+                # artifact_prefix = os.path.join(
+                #     self._artifact_dir(),
+                #     f"kpis_train_{self._dataset_artifact_label(train_date)}_{self._model_tag()}_{self._model_param_tag()}",
+                # ) if self.save_for_testing else None
+                artifact_prefix = None
 
                 self.model.fit(
                     training_time_series,
@@ -467,7 +469,8 @@ class ProfitabilityPrediction(Algorithm):
                     how="left",
                 )
 
-            self._save_csv_if_missing(prediction_snapshot, self._artifact_path("predictions", rec_time))
+            # predictions_* no longer stored in artifacts_for_counterfactuals.
+            # self._save_csv_if_missing(prediction_snapshot, self._artifact_path("predictions", rec_time))
 
         # And, finally, we sort the assets by score:
         kpi_indicators_full = (
@@ -503,7 +506,9 @@ class ProfitabilityPrediction(Algorithm):
         
         user_recs_full = pd.concat(user_recs_full)
         if self.save_for_testing:
-            self._save_csv_if_missing(user_recs_full, self._dataset_artifact_path("user_recs", rec_time))
+            # user_recs_* no longer stored in artifacts_for_counterfactuals.
+            # self._save_csv_if_missing(user_recs_full, self._dataset_artifact_path("user_recs", rec_time))
+            pass
 
         return pd.concat(user_recommendations)
  
