@@ -27,16 +27,12 @@ from utils.constants import DEFAULT_ITEM_COL, DEFAULT_RATING_COL, DEFAULT_TIMEST
 
 
 _ARTIFACTS_DIR = Path("artifacts_for_counterfactuals")
-_MODEL_TAG = "rfr_n-100_kpi-full_short_internal_kpis"
+_PKL_PREFIX = "profitability_recommendation_pipeline_"
 
-# Last window of each experiment:
-#   exp1: 2019-08-01 -> 2020-08-28
-#   exp2: 2020-09-14 -> 2021-11-23
+# Last window of each experiment (exp1: 2019-08-01 -> 2020-08-28, exp2: 2020-09-14 ->
+# 2021-11-23) — only used when --window-date is passed explicitly with these two dates;
+# by default every window found in a model tag's own folder is used.
 
-DEFAULT_EXPERIMENT_PKLS = [
-    _ARTIFACTS_DIR / _MODEL_TAG / f"profitability_recommendation_pipeline_2020-08-28_00-00-00_{_MODEL_TAG}.pkl",
-    _ARTIFACTS_DIR / _MODEL_TAG / f"profitability_recommendation_pipeline_2021-11-23_00-00-00_{_MODEL_TAG}.pkl",
-]
 FIXED_WINDOW_SIZE = 21
 DEFAULT_MAX_REFERENCE_WINDOWS = 100
 DEFAULT_DICE_METHOD = "genetic"
@@ -459,6 +455,61 @@ def _derive_data_paths(pkl_path: Path) -> tuple[Path, Path]:
         parent / f"training_data_{suffix}.csv",
         parent / f"testing_data_{suffix}.csv",
     )
+
+
+def _discover_model_tags() -> list[str]:
+    """List every tuned-model tag under _ARTIFACTS_DIR (one subdirectory per model)."""
+
+    if not _ARTIFACTS_DIR.is_dir():
+        raise ValueError(f"Artifacts directory not found: {_ARTIFACTS_DIR}")
+    tags = sorted(
+        p.name for p in _ARTIFACTS_DIR.iterdir()
+        if p.is_dir() and any(p.glob(f"{_PKL_PREFIX}*.pkl"))
+    )
+    if not tags:
+        raise ValueError(f"No model directories with pkl files found under {_ARTIFACTS_DIR}")
+    return tags
+
+
+_WINDOW_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})_\d{2}-\d{2}-\d{2}")
+
+
+def _discover_window_dates(model_tag: str) -> list[str]:
+    """List every window date found in one model tag's pkl filenames."""
+
+    tag_dir = _ARTIFACTS_DIR / model_tag
+    dates = set()
+    for pkl_path in tag_dir.glob(f"{_PKL_PREFIX}*.pkl"):
+        match = _WINDOW_DATE_RE.search(pkl_path.stem)
+        if match:
+            dates.add(match.group(1))
+    if not dates:
+        raise ValueError(f"No window dates discovered for model tag {model_tag!r} in {tag_dir}")
+    return sorted(dates)
+
+
+def _resolve_pkl_paths(model_tags: list[str], window_dates: list[str] | None) -> list[Path]:
+    """Build pkl paths for every (model_tag, window_date) combination, skipping missing files.
+
+    window_dates=None means "every window found in that model tag's own folder" —
+    each tag is resolved against its own discovered dates rather than a shared list,
+    since different tags can have slightly different windows available.
+    """
+
+    pkl_paths = []
+    for tag in model_tags:
+        tag_window_dates = window_dates if window_dates is not None else _discover_window_dates(tag)
+        for window_date in tag_window_dates:
+            pkl_path = _ARTIFACTS_DIR / tag / f"{_PKL_PREFIX}{window_date}_00-00-00_{tag}.pkl"
+            if not pkl_path.exists():
+                print(f"WARNING: pkl not found, skipping: {pkl_path}", flush=True)
+                continue
+            pkl_paths.append(pkl_path)
+    if not pkl_paths:
+        raise ValueError(
+            f"No pkl files found for model-tag(s)={model_tags} x window-date(s)={window_dates}"
+        )
+    return pkl_paths
 
 
 def _derive_output_paths(pkl_path: Path, method: str) -> tuple[Path, Path, Path]:
@@ -1029,20 +1080,47 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate counterfactuals (RFR or LGBM internal pipeline pkl) for the last window of each experiment, or custom pkls"
+        description=(
+            "Generate counterfactuals (RFR or LGBM internal pipeline pkl) for one or more "
+            "tuned models and window dates, or explicit pkls"
+        )
     )
     parser.add_argument(
         "--model-pkl",
         type=Path,
         nargs="+",
-        default=DEFAULT_EXPERIMENT_PKLS,
+        default=None,
         metavar="PKL",
         help=(
-            "One or more pkl paths to process — an internal RFR or LGBM pipeline pkl, "
-            "either works. Training/testing CSVs are auto-derived from the pkl filename. "
-            "Defaults to the RFR flagship's last window of each experiment "
-            "(2020-08-28 for exp1, 2021-11-23 for exp2); pass an LGBM pkl explicitly to "
-            "run against that instead."
+            "One or more explicit pkl paths to process — an internal RFR or LGBM pipeline "
+            "pkl, either works. Training/testing CSVs are auto-derived from the pkl "
+            "filename. Overrides --model-tag/--window-date when given."
+        ),
+    )
+    parser.add_argument(
+        "--model-tag",
+        type=str,
+        nargs="+",
+        default=None,
+        metavar="TAG",
+        help=(
+            "One or more tuned-model tags (subdirectory names under "
+            f"{_ARTIFACTS_DIR}/) to process, e.g. rfr_n-100_kpi-full_short_internal_kpis. "
+            "Defaults to every model tag found under that directory. Pass a single tag to "
+            "generate counterfactuals for just that model. Ignored if --model-pkl is given."
+        ),
+    )
+    parser.add_argument(
+        "--window-date",
+        type=str,
+        nargs="+",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=(
+            "One or more window dates to process for each selected model tag. If omitted, "
+            "every window date found in that model tag's own folder is used (all pkls). "
+            "Pass one or more dates to restrict to just those windows, e.g. the last window "
+            "of each experiment: 2020-08-28 2021-11-23. Ignored if --model-pkl is given."
         ),
     )
     parser.add_argument("--asset-id", type=str, default=None, help="Optional single asset to process")
@@ -1103,7 +1181,20 @@ def main():
             flush=True,
         )
 
-    for pkl_path in args.model_pkl:
+    if args.model_pkl is not None:
+        pkl_paths = args.model_pkl
+    else:
+        available_tags = _discover_model_tags()
+        print(f"Found {len(available_tags)} model(s) in {_ARTIFACTS_DIR}/:", flush=True)
+        for tag in available_tags:
+            n_pkls = len(list((_ARTIFACTS_DIR / tag).glob(f"{_PKL_PREFIX}*.pkl")))
+            print(f"  - {tag}: {n_pkls} pkl(s) (window(s))", flush=True)
+        model_tags = args.model_tag if args.model_tag else available_tags
+        # None -> _resolve_pkl_paths discovers every window found in each model's own folder.
+        window_dates = args.window_date if args.window_date else None
+        pkl_paths = _resolve_pkl_paths(model_tags, window_dates)
+
+    for pkl_path in pkl_paths:
         training_path, testing_path = _derive_data_paths(pkl_path)
         out_cf, out_summary, out_timeseries = _derive_output_paths(pkl_path, args.method)
         _run_for_pkl(pkl_path, training_path, testing_path, out_cf, out_summary, out_timeseries, args)
