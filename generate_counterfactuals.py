@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import dice_ml
 import numpy as np
 import pandas as pd
+import wandb
 from dice_ml import Dice
 from raiutils.exceptions import UserConfigValidationException
 
@@ -512,12 +513,17 @@ def _resolve_pkl_paths(model_tags: list[str], window_dates: list[str] | None) ->
     return pkl_paths
 
 
+def _model_dir_and_date_tag(pkl_path: Path) -> tuple[str, str]:
+    """Extract the model tag (parent directory name) and window date from a pkl path."""
+    model_dir = pkl_path.parent.name
+    date_match = re.search(r"(\d{4}-\d{2}-\d{2})", pkl_path.stem)
+    date_tag = date_match.group(1) if date_match else "unknown_date"
+    return model_dir, date_tag
+
+
 def _derive_output_paths(pkl_path: Path, method: str) -> tuple[Path, Path, Path]:
     """Derive the three output CSV paths from the pkl path, including the CF method."""
-    pkl_name = pkl_path.stem
-    model_dir = pkl_path.parent.name
-    date_match = re.search(r"(\d{4}-\d{2}-\d{2})", pkl_name)
-    date_tag = date_match.group(1) if date_match else "unknown_date"
+    model_dir, date_tag = _model_dir_and_date_tag(pkl_path)
     out_dir = Path("counterfactuals") / model_dir
     tag = f"{model_dir}_{date_tag}_{method}"
     return (
@@ -534,6 +540,27 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
     print(f"\n{'='*70}", flush=True)
     print(f"PKL: {pkl_path}", flush=True)
     print(f"{'='*70}", flush=True)
+
+    model_dir, date_tag = _model_dir_and_date_tag(pkl_path)
+    run_name = f"cf_{model_dir}_{date_tag}"
+    if args.asset_id:
+        run_name += f"_{args.asset_id}"
+    wandb.init(
+        project=os.environ.get("WANDB_PROJECT", "counterfactualFAR"),
+        group=f"cf_{model_dir}",
+        name=run_name,
+        reinit=True,
+        config={
+            "model_dir": model_dir,
+            "window_date": date_tag,
+            "method": args.method,
+            "total_cfs": args.total_cfs,
+            "maxiterations": args.maxiterations,
+            "max_reference_windows": args.max_reference_windows,
+            "asset_id": args.asset_id,
+            "n_jobs": args.n_jobs,
+        },
+    )
 
     model = _load_model(pkl_path)
 
@@ -685,12 +712,26 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
               None, row_type, None]],
             columns=window_columns,
         ).to_csv(out_summary, mode="a", header=False, index=False)
+        wandb.log({"query_index": q_idx, "n_cfs_found": 0, "row_type": row_type})
 
     def _write_results(pred_rows, summary_rows, ts_dfs):
         """Append one query's results to all three output files (call under write_lock)."""
         for row in pred_rows:
             pd.DataFrame([row], columns=prediction_columns).to_csv(
                 out_cf, mode="a", header=False, index=False)
+            wandb.log({
+                "query_index": row["query_index"],
+                "cf_index": row["cf_index"],
+                "n_cfs_found": len(pred_rows),
+                "row_type": "found",
+                "factual_prediction": row["factual_prediction"],
+                "cf_prediction": row["cf_prediction"],
+                "lift": row["lift"],
+                "validity": row["validity"],
+                "l1_dist": row["l1_dist"],
+                "l2_dist": row["l2_dist"],
+                "sparsity": row["sparsity"],
+            })
         for row in summary_rows:
             pd.DataFrame([row], columns=window_columns).to_csv(
                 out_summary, mode="a", header=False, index=False)
@@ -1076,6 +1117,10 @@ def _run_for_pkl(pkl_path: Path, training_path: Path, testing_path: Path,
         print(f"Overall progress      : {done_count}/{total_queries_in_testing} queries processed ({100*done_count/total_queries_in_testing:.1f}%)")
     except Exception:
         pass
+
+    wandb.summary["n_total_queries"] = n_total
+    wandb.summary["n_skipped_queries"] = n_skipped
+    wandb.finish()
 
 
 def main():
