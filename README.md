@@ -130,13 +130,29 @@ python3 process_results.py model
 
 ### 4. Generate Counterfactuals
 
-By default, runs the last window of each experiment (exp1: `2020-08-28`, exp2: `2021-11-23`). Training/testing CSVs and output paths are auto-derived from the model pickle filename.
+By default, runs **every tuned model found** under `artifacts_for_counterfactuals/` (one subdirectory per model), for the last window of each experiment (exp1: `2020-08-28`, exp2: `2021-11-23`). Training/testing CSVs and output paths are auto-derived from the model pickle filename. The script prints how many models it found and how many models × windows it's about to run.
 
 ```bash
 python3 generate_counterfactuals.py
 ```
 
-Run for a specific window:
+Run for a single model tag (all default windows):
+
+```bash
+python3 generate_counterfactuals.py --model-tag rfr_n-100_kpi-full_short_internal_kpis
+```
+
+Run for a single model tag and a specific window:
+
+```bash
+python3 generate_counterfactuals.py \
+  --model-tag rfr_n-100_kpi-full_short_internal_kpis \
+  --window-date 2020-08-28
+```
+
+`--model-tag` and `--window-date` each accept multiple values (space-separated) to run several models and/or windows in one invocation; either flag can be omitted to fall back to "all discovered models" / "both default windows" respectively.
+
+To bypass model-tag/window resolution entirely and point at an exact pickle, use `--model-pkl` (still supported, one or more paths):
 
 ```bash
 python3 generate_counterfactuals.py \
