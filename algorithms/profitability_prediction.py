@@ -364,12 +364,12 @@ class ProfitabilityPrediction(Algorithm):
                 pipeline_path = self._artifact_path("profitability_recommendation_pipeline", train_date, "pkl")
                 _save_pickle_object(self.model, pipeline_path)
 
-                from skl2onnx import convert_sklearn
-                from skl2onnx.common.data_types import FloatTensorType
-                initial_type = [('float_input', FloatTensorType([None, len(self.indicators)]))]
-                onnx_model = convert_sklearn(self.model.model, initial_types=initial_type)
-                with open(self._artifact_path("profitability_recommendation", train_date, "onnx"), "wb") as f:
-                    f.write(onnx_model.SerializeToString())
+                # from skl2onnx import convert_sklearn
+                # from skl2onnx.common.data_types import FloatTensorType
+                # initial_type = [('float_input', FloatTensorType([None, len(self.indicators)]))]
+                # onnx_model = convert_sklearn(self.model.model, initial_types=initial_type)
+                # with open(self._artifact_path("profitability_recommendation", train_date, "onnx"), "wb") as f:
+                #     f.write(onnx_model.SerializeToString())
             elif isinstance(self.model, LGBMKPIModel):
                 # skl2onnx does not support LGBMRegressor — save pkl only.
                 pipeline_path = self._artifact_path("profitability_recommendation_pipeline", train_date, "pkl")
@@ -386,12 +386,14 @@ class ProfitabilityPrediction(Algorithm):
                     pipeline_path = self._artifact_path("profitability_recommendation_pipeline", train_date, "pkl")
                     _save_pickle_object(self.model, pipeline_path)
                 else:
-                    from skl2onnx import convert_sklearn
-                    from skl2onnx.common.data_types import FloatTensorType
-                    initial_type = [('float_input', FloatTensorType([None, len(self.indicators)]))]
-                    onnx_model = convert_sklearn(self.model, initial_types=initial_type)
-                    with open(self._artifact_path("profitability_recommendation", train_date, "onnx"), "wb") as f:
-                        f.write(onnx_model.SerializeToString())
+                    pipeline_path = self._artifact_path("profitability_recommendation_pipeline", train_date, "pkl")
+                    _save_pickle_object(self.model, pipeline_path)
+                    # from skl2onnx import convert_sklearn
+                    # from skl2onnx.common.data_types import FloatTensorType
+                    # initial_type = [('float_input', FloatTensorType([None, len(self.indicators)]))]
+                    # onnx_model = convert_sklearn(self.model, initial_types=initial_type)
+                    # with open(self._artifact_path("profitability_recommendation", train_date, "onnx"), "wb") as f:
+                    #     f.write(onnx_model.SerializeToString())
         else:
             raise Exception("Model is not fitted yet. Cannot save an untrained model.")
         
