@@ -9,6 +9,7 @@ Answers 7 diagnostic questions from CF output files:
   5. Temporal      — How do experiments (2020 vs 2021) compare?
   6. Segmentation  — Asset clusters by effort/lift profile and actionability.
   7. Actionability — Are CF changes realistic (< 5% relative price change)?
+  8. Data utility  — Do CF price windows look statistically like real price windows?
 
 Usage:
     python cf_analysis.py                        # all sections, default dirs
@@ -25,6 +26,7 @@ import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from numpy.lib.stride_tricks import sliding_window_view
 
 CF_ROOT = "counterfactuals"
 _MODEL_TAG = "rfr_n-100_kpi-full_short_internal_kpis"
@@ -75,13 +77,18 @@ def _safe_label(label):
 
 def _load_details(path):
     df = pd.read_csv(path)
-    df["col_timestamp"] = pd.to_datetime(df["col_timestamp"])
+    df["col_timestamp"] = pd.to_datetime(df["col_timestamp"], format="mixed")
+    # cf_details is documented to hold only successful queries (see section_feasibility's
+    # note); process_results.py's fill_no_cf_rows() appends NaN placeholder rows for no_cf/
+    # skipped queries for other bookkeeping, so drop them back out here.
+    if "cf_prediction" in df.columns:
+        df = df[df["cf_prediction"].notna()].reset_index(drop=True)
     return df
 
 
 def _load_summary(path):
     df = pd.read_csv(path)
-    df["col_timestamp"] = pd.to_datetime(df["col_timestamp"])
+    df["col_timestamp"] = pd.to_datetime(df["col_timestamp"], format="mixed")
     return df
 
 
@@ -362,6 +369,234 @@ def section_price_pattern(cf_files, out_dir):
 # Section 5: Temporal comparison
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _classify_lag_copies(merged, C, artifacts_dir, exp_date, model_tag, tol=1e-6, max_lag=100):
+    """Flag which counterfactual windows are exact copies of the *same asset's own* real
+    window ending 1..max_lag observations before the query — i.e. retrieved history rather
+    than a genuinely searched/mutated candidate. Returns a bool array aligned with `merged`,
+    or None if the training/testing price files for this window aren't available.
+    """
+    train_path = os.path.join(artifacts_dir, f"training_data_{exp_date}_00-00-00_{model_tag}.csv")
+    test_path = os.path.join(artifacts_dir, f"testing_data_{exp_date}_00-00-00_{model_tag}.csv")
+    if not (os.path.exists(train_path) and os.path.exists(test_path)):
+        return None
+
+    px = pd.concat([pd.read_csv(train_path), pd.read_csv(test_path)])
+    px = px.drop_duplicates(["col_item", "col_timestamp", "col_rating"])
+    px["col_timestamp"] = pd.to_datetime(px["col_timestamp"])
+    px = px.sort_values(["col_item", "col_timestamp"])
+
+    window_size = C.shape[1]
+    ts = pd.to_datetime(merged["col_timestamp"])
+    is_copy = np.zeros(len(merged), dtype=bool)
+
+    for asset, s in px.groupby("col_item"):
+        rows = merged.index[merged["col_item"] == asset]
+        if len(rows) == 0:
+            continue
+        dates, vals = s["col_timestamp"].values, s["col_rating"].values.astype(float)
+        if len(vals) < window_size + 1:
+            continue
+        windows = sliding_window_view(vals, window_size)
+        pos = pd.Series(np.arange(len(dates)), index=dates)
+        pos = pos[~pos.index.duplicated()]
+        for r in rows:
+            q = pos.get(ts.loc[r])
+            if q is None:
+                continue
+            ks = np.arange(1, max_lag + 1)
+            j = q - ks - (window_size - 1)
+            ok = j >= 0
+            if not ok.any():
+                continue
+            cand = windows[j[ok]]
+            c = C[merged.index.get_loc(r)]
+            rel = np.abs(cand - c).max(axis=1) / (np.abs(c).max() + 1e-12)
+            if (rel < tol).any():
+                is_copy[merged.index.get_loc(r)] = True
+    return is_copy
+
+
+def section_data_utility(cf_files, out_dir, artifacts_dir=None, model_tag=None):
+    """Compare factual vs CF windows for distributional realism ("data utility"):
+    does a counterfactual price path look like a real one, not just hit the target score?
+
+    Stratified by whether the CF is an exact copy of the asset's own earlier window
+    (retrieved real history — realism is guaranteed by construction) versus not
+    (genuinely searched/mutated by DiCE — the only subset this actually tests).
+    """
+    print("\n" + "=" * 60)
+    print("SECTION 8: DATA UTILITY (does a CF look like real price data?)")
+    print("=" * 60)
+
+    for f in cf_files:
+        if f["summary_path"] is None:
+            print(f"[{f['label']}] No summary file — skipping data utility analysis.")
+            continue
+
+        label = f["label"]
+        summary = _load_summary(f["summary_path"])
+        factual = summary[summary["row_type"] == "factual"].copy().reset_index(drop=True)
+        cf = summary[summary["row_type"] == "counterfactual"].copy().reset_index(drop=True)
+
+        def parse_windows(df):
+            parsed = df["window_line"].apply(json.loads)
+            return pd.DataFrame(parsed.tolist(), index=df.index)
+
+        try:
+            factual_wins = parse_windows(factual)
+            cf_wins = parse_windows(cf)
+        except Exception as e:
+            print(f"[{label}] Could not parse window_line JSON: {e}")
+            continue
+
+        key_cols = ["query_index", "cf_index", "col_item", "col_timestamp"]
+        f_keyed = pd.concat([factual[key_cols].reset_index(drop=True),
+                              factual_wins.reset_index(drop=True)], axis=1)
+        c_keyed = pd.concat([cf[key_cols].reset_index(drop=True),
+                              cf_wins.reset_index(drop=True)], axis=1)
+        merged = f_keyed.merge(c_keyed, on=key_cols, suffixes=("_f", "_c")).reset_index(drop=True)
+
+        window_cols = sorted(factual_wins.columns.tolist(),
+                             key=lambda x: int(x.split("_")[1]) if x.startswith("w_") else 0)
+        if len(window_cols) < 2:
+            print(f"[{label}] Window too short for returns — skipping.")
+            continue
+
+        F = merged[[c + "_f" for c in window_cols]].to_numpy(dtype=float)
+        C = merged[[c + "_c" for c in window_cols]].to_numpy(dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ret_f_all = np.diff(F, axis=1) / F[:, :-1]
+            ret_c_all = np.diff(C, axis=1) / C[:, :-1]
+        finite = np.isfinite(ret_f_all).all(axis=1) & np.isfinite(ret_c_all).all(axis=1)
+        merged, F, C = merged[finite].reset_index(drop=True), F[finite], C[finite]
+        ret_f_all, ret_c_all = ret_f_all[finite], ret_c_all[finite]
+        if len(ret_f_all) == 0:
+            print(f"[{label}] No valid windows after filtering — skipping.")
+            continue
+
+        # --- Terminal (query-date) price: real vs CF, pooled over ALL found CFs -----------
+        # Not split by lag-copy: that distinction matters for window *shape* (below), but a
+        # copy's terminal price is just as real a number as its window is, so splitting here
+        # would only add a panel without adding information.
+        price_f_all, price_c_all = F[:, -1], C[:, -1]
+        price_rel_all = price_c_all / price_f_all - 1
+        print(f"\n[{label}] Terminal price, all {len(price_f_all)} found CFs (real vs CF, pooled):")
+        print(f"  median relative change {100 * np.median(price_rel_all):+.3f}%  |  "
+              f"p10={100 * np.percentile(price_rel_all, 10):+.2f}%  "
+              f"p90={100 * np.percentile(price_rel_all, 90):+.2f}%  |  "
+              f"CF price higher than real: {100 * (price_rel_all > 0).mean():.1f}%")
+
+        fig_p, axes_p = plt.subplots(1, 2, figsize=(13, 5))
+
+        lo, hi = np.percentile(price_rel_all * 100, [0.5, 99.5])
+        axes_p[0].hist(price_rel_all * 100, bins=np.linspace(lo, hi, 80), color="#16a085", alpha=0.85)
+        axes_p[0].axvline(0, color="black", linewidth=1, linestyle="--", label="no change")
+        axes_p[0].axvline(100 * np.median(price_rel_all), color="red", linewidth=1, linestyle="--",
+                          label=f"median={100 * np.median(price_rel_all):+.2f}%")
+        axes_p[0].set_xlabel("Relative price change, CF vs real (%)")
+        axes_p[0].set_ylabel("Number of queries")
+        axes_p[0].set_title("Terminal price change")
+        axes_p[0].legend(fontsize=8)
+        axes_p[0].grid(axis="y", linestyle="--", alpha=0.3)
+
+        pmin, pmax = min(price_f_all.min(), price_c_all.min()), max(price_f_all.max(), price_c_all.max())
+        axes_p[1].scatter(price_f_all, price_c_all, s=5, alpha=0.08, color="#16a085", linewidths=0)
+        axes_p[1].plot([pmin, pmax], [pmin, pmax], color="black", linewidth=1, linestyle="--",
+                      label="y = x (CF price = real price)")
+        axes_p[1].set_xscale("log")
+        axes_p[1].set_yscale("log")
+        axes_p[1].set_xlim(pmin, pmax)
+        axes_p[1].set_ylim(pmin, pmax)
+        axes_p[1].set_xlabel("Real price on query date (log scale)")
+        axes_p[1].set_ylabel("CF's implied price (log scale)")
+        axes_p[1].set_title("Real vs CF price (log scale — see left panel for the real signal)")
+        axes_p[1].legend(fontsize=8, loc="upper left")
+        axes_p[1].grid(linestyle="--", alpha=0.3, which="both")
+        axes_p[1].set_aspect("equal")
+
+        fig_p.suptitle(f"Terminal price, before vs after — {label}", fontsize=13)
+        fig_p.tight_layout()
+        price_out_path = os.path.join(out_dir, f"data_utility_price_{_safe_label(label)}.png")
+        fig_p.savefig(price_out_path, dpi=150)
+        plt.close(fig_p)
+        print(f"[{label}] Saved: {price_out_path}")
+
+        # --- Window shape (returns / volatility): split by lag-copy, since that's where -----
+        # retrieval vs. genuine search actually changes the answer.
+        is_copy = None
+        if artifacts_dir and model_tag:
+            print(f"[{label}] Classifying lag copies against {artifacts_dir} (this can take a few minutes)...")
+            is_copy = _classify_lag_copies(merged, C, artifacts_dir, f["exp_date"], model_tag)
+            if is_copy is None:
+                print(f"[{label}] Training/testing price files not found under {artifacts_dir} — "
+                      "showing the unstratified (pooled) comparison instead.")
+
+        groups = [("All found CFs", np.ones(len(merged), dtype=bool))] if is_copy is None else [
+            ("Lag copies (retrieved history)", is_copy),
+            ("Not a lag copy (searched/mutated)", ~is_copy),
+        ]
+
+        fig, axes = plt.subplots(2, len(groups), figsize=(6.5 * len(groups), 9), squeeze=False)
+
+        for col, (gname, gmask) in enumerate(groups):
+            ret_f, ret_c = ret_f_all[gmask], ret_c_all[gmask]
+            n = gmask.sum()
+            print(f"\n[{label}] {gname}: n = {n} ({100 * n / len(gmask):.1f}% of found CFs)")
+            if n == 0:
+                for row in (0, 1):
+                    axes[row, col].set_title(f"{gname}\n(no rows)")
+                continue
+
+            pooled_f, pooled_c = ret_f.ravel(), ret_c.ravel()
+            vol_f, vol_c = ret_f.std(axis=1), ret_c.std(axis=1)
+            vol_diff = vol_c - vol_f  # paired: this query's CF minus this exact query's own factual
+            print("  return quantiles (%), factual vs CF:")
+            for q in (10, 25, 50, 75, 90):
+                print(f"    p{q:<3d}: {100 * np.percentile(pooled_f, q):+.3f}  vs  {100 * np.percentile(pooled_c, q):+.3f}")
+            print(f"  window volatility (std of within-window returns), median: "
+                  f"factual={100 * np.median(vol_f):.3f}%  CF={100 * np.median(vol_c):.3f}%")
+            print(f"  paired per-query difference (CF − its own factual), median: "
+                  f"{100 * np.median(vol_diff):+.3f} pp  |  CF more volatile than its own query: "
+                  f"{100 * (vol_diff > 0).mean():.1f}%")
+
+            lo, hi = np.percentile(np.concatenate([pooled_f, pooled_c]), [0.5, 99.5])
+            bins = np.linspace(lo, hi, 80)
+
+            ax = axes[0, col]
+            ax.hist(pooled_f, bins=bins, density=True, histtype="step", linewidth=1.8,
+                    color="#0181cb", label="Factual")
+            ax.hist(pooled_c, bins=bins, density=True, histtype="step", linewidth=1.8,
+                    color="#ffbc42", label="Counterfactual")
+            ax.set_xlabel("Day-over-day return within window")
+            ax.set_ylabel("Density")
+            ax.set_title(f"{gname} (n={n})")
+            ax.legend(fontsize=8)
+            ax.grid(linestyle="--", alpha=0.3)
+
+            ax = axes[1, col]
+            vmax = np.percentile(np.concatenate([vol_f, vol_c]), 99.5)
+            ax.scatter(vol_f, vol_c, s=6, alpha=0.15, color="#8e44ad", linewidths=0)
+            ax.plot([0, vmax], [0, vmax], color="black", linewidth=1, linestyle="--",
+                    label="y = x (CF as volatile as its own query)")
+            ax.set_xlim(0, vmax)
+            ax.set_ylim(0, vmax)
+            ax.set_xlabel("Factual volatility (this query)")
+            ax.set_ylabel("Counterfactual volatility (this query's CF)")
+            above = 100 * (vol_diff > 0).mean()
+            ax.set_title(f"Window-level volatility, paired by query\n"
+                         f"CF more volatile in {above:.1f}% of queries")
+            ax.legend(fontsize=7, loc="upper left")
+            ax.grid(linestyle="--", alpha=0.3)
+            ax.set_aspect("equal")
+
+        fig.suptitle(f"Data utility — {label}", fontsize=13)
+        fig.tight_layout()
+        out_path = os.path.join(out_dir, f"data_utility_{_safe_label(label)}.png")
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f"\n[{label}] Saved: {out_path}")
+
+
 def section_temporal(cf_files, out_dir):
     """Compare key metrics across experiment dates, grouped by method."""
     print("\n" + "=" * 60)
@@ -610,10 +845,17 @@ def main():
         help="Output directory for analysis plots and CSVs",
     )
     parser.add_argument(
+        "--artifacts-dir",
+        default=os.path.join("artifacts_for_counterfactuals", _MODEL_TAG),
+        help="Directory with training_data_*.csv / testing_data_*.csv, used by the "
+             "data-utility section to classify CFs that are exact copies of the asset's "
+             "own earlier window (pass '' to skip and get the unstratified comparison)",
+    )
+    parser.add_argument(
         "--sections",
         nargs="+",
         default=["all"],
-        choices=["all", "feasibility", "effort", "lift", "pattern", "temporal", "segmentation", "actionability"],
+        choices=["all", "feasibility", "effort", "lift", "pattern", "temporal", "segmentation", "actionability", "data-utility"],
         help="Which sections to run (default: all)",
     )
     args = parser.parse_args()
@@ -645,6 +887,8 @@ def main():
         section_segmentation(cf_files, args.out_dir)
     if run_all or "actionability" in args.sections:
         section_actionability(cf_files, args.out_dir)
+    if run_all or "data-utility" in args.sections:
+        section_data_utility(cf_files, args.out_dir, artifacts_dir=args.artifacts_dir or None, model_tag=_MODEL_TAG)
 
     print(f"\nAll outputs saved to: {args.out_dir}")
 
