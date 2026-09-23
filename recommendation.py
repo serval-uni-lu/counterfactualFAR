@@ -12,6 +12,8 @@
 import datetime as dt
 import json
 import os
+import platform
+import socket
 import sys
 
 import argparse
@@ -23,6 +25,7 @@ from utils.constants import DEFAULT_TIMESTAMP_COL, DEFAULT_ITEM_COL, DEFAULT_RAT
 from codecarbon import EmissionsTracker
 from lightgbm import LGBMRegressor
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
 
 try:
     pd.set_option("future.infer_string", False)
@@ -32,7 +35,10 @@ except Exception:
 from algorithms.kpi_gen.load_kpi_generator import LoadKPIGenerator
 from algorithms.kpi_gen.ma_kpi_generator import MAKPIGenerator
 from algorithms.lgbm_kpi_model import LGBMKPIModel
+from algorithms.lr_kpi_model import LRKPIModel
 from algorithms.rfr_kpi_model import RFRKPIModel
+from algorithms.tabfm_kpi_model import TabFMKPIModel
+from algorithms.tabicl_kpi_model import TabICLKPIModel
 from algorithms.tabpfn_kpi_model import TabPFNKPIModel
 from algorithms.profitability_prediction import ProfitabilityPrediction
 from data.filter.asset.asset_with_test_price import AssetWithTestPrice
@@ -88,6 +94,9 @@ full_short_kpis = ["past_profitability_21d", "past_profitability_63d", "past_pro
 RFR = "rfr"
 LGBM = "lgbm"
 TABPFN = "tabpfn"
+TABICL = "tabicl"
+TABFM = "tabfm"
+LR = "lr"
 KPI_TYPES = {"full", "basic", "basic_short", "full_short"}
 
 def _parse_rfr_params(params):
@@ -150,11 +159,39 @@ def _parse_lgbm_params(params):
     return n, kpi_type, use_internal, tuned
 
 
-def _parse_tabpfn_params(params):
-    """TabPFN accepts a kpi_type and, optionally, a training/generalization-metrics
-    sample fraction (a bare number in (0, 1], e.g. "0.25") — applied to both the
-    actual fit (bounds the GPU context TabPFN trains/predicts on) and the
-    generalization-metrics diagnostic, per-asset stratified. 
+def _parse_lr_params(params):
+    kpi_type = "full_short"
+    use_internal = True
+    tuned = False
+
+    for raw in params or []:
+        token = str(raw).strip()
+        if token == "":
+            continue
+
+        token_lower = token.lower()
+        if token_lower in KPI_TYPES:
+            kpi_type = token_lower
+            continue
+
+        if token_lower == "external":
+            use_internal = False
+            continue
+
+        if token_lower == "tuned":
+            tuned = True
+            continue
+
+    return kpi_type, use_internal, tuned
+
+
+def _parse_foundation_model_params(params, label):
+    """Shared parser for the pretrained in-context tabular foundation models
+    (tabpfn, tabicl, tabfm): a kpi_type and, optionally, a training/
+    generalization-metrics sample fraction (a bare number in (0, 1], e.g.
+    "0.25") — applied to both the actual fit (bounds the GPU context the
+    model trains/predicts on) and the generalization-metrics diagnostic,
+    per-asset stratified.
     """
     kpi_type = "full_short"
     sample_pct = None
@@ -179,12 +216,24 @@ def _parse_tabpfn_params(params):
             continue
 
         raise ValueError(
-            f"Unsupported tabpfn parameter: '{token}'. Only a kpi_type "
+            f"Unsupported {label} parameter: '{token}'. Only a kpi_type "
             f"({sorted(KPI_TYPES)}) or a sample fraction in (0, 1] is "
-            f"supported for tabpfn."
+            f"supported for {label}."
         )
 
     return kpi_type, sample_pct
+
+
+def _parse_tabpfn_params(params):
+    return _parse_foundation_model_params(params, "tabpfn")
+
+
+def _parse_tabicl_params(params):
+    return _parse_foundation_model_params(params, "tabicl")
+
+
+def _parse_tabfm_params(params):
+    return _parse_foundation_model_params(params, "tabfm")
 
 
 def _load_tuned_params(model_id, kpi_type):
@@ -202,6 +251,78 @@ def _load_tuned_params(model_id, kpi_type):
         )
     with open(path, "r") as handle:
         return json.load(handle)
+
+
+def _release_gpu_memory():
+    """Reclaim GPU memory between windows.
+
+    Each window builds a brand-new model (TabPFN in particular loads a fresh
+    pretrained transformer onto the GPU every window). Once that window's
+    objects go out of scope in the caller, plain refcounting won't always free
+    them immediately — sklearn Pipeline/torch module objects can hold internal
+    reference cycles that need a gc pass — and even once freed, PyTorch's CUDA
+    caching allocator keeps that memory reserved for reuse rather than handing
+    it back to the driver. Across ~61 windows of varying (growing, since the
+    training window expands over time) tensor shapes, that reserved memory
+    fragments and keeps climbing, which shows up as "accumulating" GPU memory
+    in nvidia-smi even though nothing is actually leaked at the Python level.
+    Safe/near-free no-op for CPU-only models (rfr/lgbm/lr).
+    """
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception as exc:
+        print(f"WARNING: Could not release GPU memory: {exc}", flush=True)
+
+
+_machine_info_cache = None
+
+
+def _get_machine_info():
+    """Best-effort machine fingerprint, so results can later be traced back to
+    the hardware they ran on (useful since this project runs across several
+    machines). Computed once per process and reused for every window."""
+    global _machine_info_cache
+    if _machine_info_cache is not None:
+        return _machine_info_cache
+
+    info = {
+        "hostname": socket.gethostname(),
+        "os": platform.platform(),
+        "python_version": platform.python_version(),
+        "cpu_count": os.cpu_count(),
+    }
+
+    try:
+        import cpuinfo
+        info["cpu_model"] = cpuinfo.get_cpu_info().get("brand_raw", "unknown")
+    except Exception as exc:
+        info["cpu_model"] = f"unknown ({exc})"
+
+    try:
+        import psutil
+        info["ram_total_gb"] = round(psutil.virtual_memory().total / (1024 ** 3), 2)
+    except Exception as exc:
+        info["ram_total_gb"] = f"unknown ({exc})"
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            info["gpu_count"] = torch.cuda.device_count()
+            info["gpu_model"] = torch.cuda.get_device_name(0)
+        else:
+            info["gpu_count"] = 0
+            info["gpu_model"] = "none"
+    except Exception as exc:
+        info["gpu_count"] = "unknown"
+        info["gpu_model"] = f"unknown ({exc})"
+
+    _machine_info_cache = info
+    return info
 
 
 def test(algorithm, eval_metrics, file, recomm_date, customers):
@@ -232,6 +353,11 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
             output_file=os.path.basename(emissions_path),
             measure_power_secs=1,
             log_level="error",
+            # "machine" (the default) attributes the whole machine's power draw
+            # (idle GPU, other processes) to this run; "process" estimates only
+            # this process's own share, so CPU-only models like RFR stop
+            # reporting non-trivial GPU energy from background/idle draw.
+            tracking_mode="process",
         )
         tracker.start()
     except Exception as exc:
@@ -304,11 +430,19 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
         f.write(key + "\t" + str(val) + "\n")
     f.close()
 
+    # Machine fingerprint, kept out of _metrics.csv (numeric fields like cpu_count
+    # would otherwise get picked up as "metrics" by process_results.py's per-metric
+    # aggregation/plots) so it stays pure provenance, checked separately.
+    machine_info = _get_machine_info()
+    with open(file + "_machine.json", "w") as mf:
+        json.dump(machine_info, mf, indent=2)
+
     wandb.log({
         **{key: val[1] for key, val in metric_res.items()},
         **timing_metrics,
         **energy_metrics,
         **gen_metrics,
+        **{"machine_" + key: val for key, val in machine_info.items()},
         "rec_date": str(recomm_date.date()),
     })
 
@@ -347,6 +481,7 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
     kpi_type = "full_short"
     use_internal_rfr = True
     use_internal_lgbm = True
+    use_internal_lr = True
     tuned = False
     n = 20
     sample_pct = None
@@ -355,8 +490,14 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
         n, kpi_type, use_internal_rfr, tuned = _parse_rfr_params(param)
     elif model_id == LGBM:
         n, kpi_type, use_internal_lgbm, tuned = _parse_lgbm_params(param)
+    elif model_id == LR:
+        kpi_type, use_internal_lr, tuned = _parse_lr_params(param)
     elif model_id == TABPFN:
         kpi_type, sample_pct = _parse_tabpfn_params(param)
+    elif model_id == TABICL:
+        kpi_type, sample_pct = _parse_tabicl_params(param)
+    elif model_id == TABFM:
+        kpi_type, sample_pct = _parse_tabfm_params(param)
 
     # Determine features based on kpi_type
     if kpi_type == "full":
@@ -399,8 +540,27 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
             alg_model = LGBMKPIModel(**lgbm_kwargs)
         else:
             alg_model = LGBMRegressor()
+    elif model_id == LR:
+        if use_internal_lr:
+            lr_kwargs = dict(k=5, kpi_type=kpi_type, kpi_features=feats)
+            if tuned:
+                best = _load_tuned_params(LR, kpi_type)
+                lr_kwargs["fit_intercept"] = best["fit_intercept"]
+            alg_model = LRKPIModel(**lr_kwargs)
+        else:
+            alg_model = LinearRegression()
     elif model_id == TABPFN:
         alg_model = TabPFNKPIModel(
+            k=5, kpi_type=kpi_type, kpi_features=feats, random_state=42,
+            sample_pct=sample_pct,
+        )
+    elif model_id == TABICL:
+        alg_model = TabICLKPIModel(
+            k=5, kpi_type=kpi_type, kpi_features=feats, random_state=42,
+            sample_pct=sample_pct,
+        )
+    elif model_id == TABFM:
+        alg_model = TabFMKPIModel(
             k=5, kpi_type=kpi_type, kpi_features=feats, random_state=42,
             sample_pct=sample_pct,
         )
@@ -433,11 +593,27 @@ def get_name(rec_model, param):
         algorithm_name = LGBM + "_" + name_n + "_" + kpi_type
         if use_internal_lgbm:
             algorithm_name += "_internal_kpis"
+    elif rec_model == LR:
+        kpi_type, use_internal_lr, tuned = _parse_lr_params(param)
+        name_n = "tuned" if tuned else "default"
+        algorithm_name = LR + "_" + name_n + "_" + kpi_type
+        if use_internal_lr:
+            algorithm_name += "_internal_kpis"
     elif rec_model == TABPFN:
         kpi_type, sample_pct = _parse_tabpfn_params(param)
         algorithm_name = TABPFN + "_" + kpi_type + "_internal_kpis"
         if sample_pct is not None:
             algorithm_name += "_tabpfn_sample" + str(sample_pct)
+    elif rec_model == TABICL:
+        kpi_type, sample_pct = _parse_tabicl_params(param)
+        algorithm_name = TABICL + "_" + kpi_type + "_internal_kpis"
+        if sample_pct is not None:
+            algorithm_name += "_tabicl_sample" + str(sample_pct)
+    elif rec_model == TABFM:
+        kpi_type, sample_pct = _parse_tabfm_params(param)
+        algorithm_name = TABFM + "_" + kpi_type + "_internal_kpis"
+        if sample_pct is not None:
+            algorithm_name += "_tabfm_sample" + str(sample_pct)
     else:
         # RFR (internal or external)
         n, kpi_type, use_internal_rfr, tuned = _parse_rfr_params(param)
@@ -553,7 +729,7 @@ if __name__ == "__main__":
     parser_range.add_argument("num_future", help='Number of dates to look formward', type=int)
     parser_range.add_argument("output_dir", help="directory on which to store the outputs.")
     parser_range.add_argument("months", help="number of months to look into the future.")
-    parser_range.add_argument("model", help="model identifier", choices=[RFR, LGBM, TABPFN])
+    parser_range.add_argument("model", help="model identifier", choices=[RFR, LGBM, TABPFN, TABICL, TABFM, LR])
     parser_range.add_argument("params", help="model parameters", action="store", nargs="*")
 
     parser_fixed = subparsers.add_parser('fixed_dates', help='List of fixed dates to use. This mode provides fixed '
@@ -562,7 +738,7 @@ if __name__ == "__main__":
     parser_fixed.add_argument('future_dates', help='Comma separated list of test end dates. Date format: %Y-%m-%d')
     parser_fixed.add_argument("output_dir", help="directory on which to store the outputs.")
     parser_fixed.add_argument("months", help="number of months to look into the future.")
-    parser_fixed.add_argument("model", help="model identifier", choices=[RFR, LGBM, TABPFN])
+    parser_fixed.add_argument("model", help="model identifier", choices=[RFR, LGBM, TABPFN, TABICL, TABFM, LR])
     parser_fixed.add_argument("params", help="model parameters", action="store", nargs="*")
 
     args = parser.parse_args()
@@ -605,10 +781,13 @@ if __name__ == "__main__":
     selected_kpi_type = "full_short"
     use_internal_rfr = True
     use_internal_lgbm = True
+    use_internal_lr = True
     if model == RFR:
         _, selected_kpi_type, use_internal_rfr, _ = _parse_rfr_params(params)
     elif model == LGBM:
         _, selected_kpi_type, use_internal_lgbm, _ = _parse_lgbm_params(params)
+    elif model == LR:
+        selected_kpi_type, use_internal_lr, _ = _parse_lr_params(params)
 
     # If the number of days is 0 for the delta, we choose as minimum date one in the distant past
     # (36525 days is exactly 100 years before the established date)
@@ -624,7 +803,7 @@ if __name__ == "__main__":
     print("Dataset loaded (" + '{}'.format(timeb) + ")")
 
     # Compute the technical indicators (required for Random Forest)
-    if (model == RFR and not use_internal_rfr) or (model == LGBM and not use_internal_lgbm):
+    if (model == RFR and not use_internal_rfr) or (model == LGBM and not use_internal_lgbm) or (model == LR and not use_internal_lr):
         kpi_file = os.path.join(directory, "kpis.csv")
         kpi_type = selected_kpi_type
 
@@ -741,5 +920,10 @@ if __name__ == "__main__":
         # CPUs without joblib's nested-parallelism cap inside a subprocess.
         regressor(model, params, splitted_data, rec_date, metrics, directory, alg_name, months_term,
                   save_for_testing)
+
+        # Drop this window's data/algorithm objects before the next window builds
+        # its own — see _release_gpu_memory() for why this matters for tabpfn.
+        del splitted_data, profitability_df, volatility_df, metrics
+        _release_gpu_memory()
 
     wandb.finish()

@@ -2,7 +2,7 @@
 import os
 import sys
 
-from recommendation import _parse_tabpfn_params
+from recommendation import _parse_tabpfn_params, _parse_tabicl_params, _parse_tabfm_params
 
 __author__ = "Javier Sanz-Cruzado (javier.sanz-cruzadopuig@glasgow.ac.uk)"
 
@@ -34,8 +34,8 @@ if __name__ == "__main__":
         sys.stderr.write("ERROR: Invalid arguments")
         sys.stderr.write("\tdataset_path: route to the dataset.")
         sys.stderr.write("\toutput_dir: directory on which to store the results.")
-        sys.stderr.write("\t(optional) model: rfr|lgbm|tabpfn")
-        sys.stderr.write("\t(optional) model params: rfr/lgbm -> <n_estimators> <kpi_type>")
+        sys.stderr.write("\t(optional) model: rfr|lgbm|tabpfn|tabicl|tabfm|lr")
+        sys.stderr.write("\t(optional) model params: rfr/lgbm -> <n_estimators> <kpi_type>, lr -> <kpi_type> [tuned]")
 
     dataset_path = sys.argv[1]
     output_directory = sys.argv[2]
@@ -69,16 +69,36 @@ if __name__ == "__main__":
                 model_config = ("tabpfn", "tabpfn", *model_params)
             else:
                 model_config = ("tabpfn", "tabpfn", "full_short")
+        elif model_id == "tabicl":
+            if model_params:
+                model_config = ("tabicl", "tabicl", *model_params)
+            else:
+                model_config = ("tabicl", "tabicl", "full_short")
+        elif model_id == "tabfm":
+            if model_params:
+                model_config = ("tabfm", "tabfm", *model_params)
+            else:
+                model_config = ("tabfm", "tabfm", "full_short")
+        elif model_id == "lr":
+            if model_params:
+                model_config = ("lr", "lr", *model_params)
+            else:
+                model_config = ("lr", "lr", "full_short")
         else:
-            sys.exit("ERROR: model must be 'rfr', 'lgbm', or 'tabpfn'")
+            sys.exit("ERROR: model must be 'rfr', 'lgbm', 'tabpfn', 'tabicl', 'tabfm', or 'lr'")
 
     for date in dates:
         print("Starting", model_config[0], "for time horizon of", date[4], "month(s)")
 
         directory = os.path.join(date[5], model_config[1])
-        if model_config[0] == "tabpfn":
-            # Nest tabpfn results by sample fraction (results/tabpfn/sample{pct}/...)
-            _, sample_pct = _parse_tabpfn_params(model_config[2:])
+        sample_parser = {
+            "tabpfn": _parse_tabpfn_params,
+            "tabicl": _parse_tabicl_params,
+            "tabfm": _parse_tabfm_params,
+        }.get(model_config[0])
+        if sample_parser is not None:
+            # Nest foundation-model results by sample fraction (results/<model>/sample{pct}/...)
+            _, sample_pct = sample_parser(model_config[2:])
             sample_tag = f"sample{sample_pct}" if sample_pct is not None else "sample1.0"
             directory = os.path.join(directory, sample_tag)
         os.makedirs(directory, exist_ok=True)

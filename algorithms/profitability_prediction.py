@@ -23,11 +23,19 @@ from utils.common_util import stratified_sample_by_group
 
 from algorithms.algorithm import Algorithm
 from algorithms.lgbm_kpi_model import LGBMKPIModel
+from algorithms.lr_kpi_model import LRKPIModel
 from algorithms.rfr_kpi_model import RFRKPIModel
+from algorithms.tabfm_kpi_model import TabFMKPIModel
+from algorithms.tabicl_kpi_model import TabICLKPIModel
 from algorithms.tabpfn_kpi_model import TabPFNKPIModel
 
 
-INTERNAL_KPI_MODELS = (RFRKPIModel, LGBMKPIModel, TabPFNKPIModel)
+# Pretrained in-context tabular foundation models: fit() just caches the
+# training set, cost scales with context size (sample_pct knob), artifact
+# dumps are large/unused, and GPU memory needs releasing between windows.
+FOUNDATION_KPI_MODELS = (TabPFNKPIModel, TabICLKPIModel, TabFMKPIModel)
+
+INTERNAL_KPI_MODELS = (RFRKPIModel, LGBMKPIModel, LRKPIModel) + FOUNDATION_KPI_MODELS
 
 
 class ProfitabilityPrediction(Algorithm):
@@ -52,16 +60,22 @@ class ProfitabilityPrediction(Algorithm):
         self.model = model
         self.train_examples_per_asset = train_examples_per_asset
         self.is_fitted = False
-        # do not create an artifacts_for_counterfactuals/ directory for a TabPFN
-        self.save_for_testing = save_for_testing and not isinstance(model, TabPFNKPIModel)
+        # do not create an artifacts_for_counterfactuals/ directory for a foundation model
+        self.save_for_testing = save_for_testing and not isinstance(model, FOUNDATION_KPI_MODELS)
 
     def _model_tag(self):
         if isinstance(self.model, RFRKPIModel):
             return "rfr"
         if isinstance(self.model, LGBMKPIModel):
             return "lgbm"
+        if isinstance(self.model, LRKPIModel):
+            return "lr"
         if isinstance(self.model, TabPFNKPIModel):
             return "tabpfn"
+        if isinstance(self.model, TabICLKPIModel):
+            return "tabicl"
+        if isinstance(self.model, TabFMKPIModel):
+            return "tabfm"
         return "rfr"
 
     def _safe_fragment(self, value):
@@ -94,11 +108,19 @@ class ProfitabilityPrediction(Algorithm):
                 )
             return self._safe_fragment(f"n-{n_estimators}_kpi-{kpi_type}_internal_kpis")
 
-        if isinstance(self.model, TabPFNKPIModel):
+        if isinstance(self.model, LRKPIModel):
+            kpi_type = getattr(self.model, "kpi_type", "na")
+            fit_intercept = getattr(self.model, "fit_intercept", True)
+            if not fit_intercept:
+                return self._safe_fragment(f"kpi-{kpi_type}_internal_kpis_lr_tuned")
+            return self._safe_fragment(f"kpi-{kpi_type}_internal_kpis")
+
+        if isinstance(self.model, FOUNDATION_KPI_MODELS):
             kpi_type = getattr(self.model, "kpi_type", "na")
             sample_pct = getattr(self.model, "sample_pct", None)
+            tag = self._model_tag()
             if sample_pct is not None:
-                return self._safe_fragment(f"kpi-{kpi_type}_internal_kpis_tabpfn_sample{sample_pct}")
+                return self._safe_fragment(f"kpi-{kpi_type}_internal_kpis_{tag}_sample{sample_pct}")
             return self._safe_fragment(f"kpi-{kpi_type}_internal_kpis")
 
         n_estimators = getattr(self.model, "n_estimators", "na")
@@ -129,7 +151,7 @@ class ProfitabilityPrediction(Algorithm):
 
         try:
             sample_pct = getattr(self.model, "sample_pct", None)
-            if isinstance(self.model, TabPFNKPIModel) and sample_pct is not None:
+            if isinstance(self.model, FOUNDATION_KPI_MODELS) and sample_pct is not None:
                 seed = getattr(self.model, "random_state", 42)
                 kpi_train_feats, train_targets = stratified_sample_by_group(
                     kpi_train_feats, train_targets, sample_pct, seed=seed
@@ -206,7 +228,8 @@ class ProfitabilityPrediction(Algorithm):
         if not has_kpi_path:
             raise ValueError(
                 "Internal model contract violation: missing time-series→KPI generation path. "
-                "Expected RFRKPIModel/LGBMKPIModel/TabPFNKPIModel._generate_kpis_df."
+                "Expected an internal KPI model (one of INTERNAL_KPI_MODELS) with a "
+                "_generate_kpis_df method."
             )
 
         if not hasattr(self.model, "fit"):
@@ -344,10 +367,10 @@ class ProfitabilityPrediction(Algorithm):
             self._release_gpu_memory()
 
     def _release_gpu_memory(self):
-        # TabPFN keeps the training context resident on the GPU between windows;
-        # without this, per-window allocations accumulate across the date loop
-        # and eventually trigger CUDA OOM (seen when computing generalization metrics).
-        if isinstance(self.model, TabPFNKPIModel) and torch.cuda.is_available():
+        # Foundation models keep the training context resident on the GPU between
+        # windows; without this, per-window allocations accumulate across the date
+        # loop and eventually trigger CUDA OOM (seen when computing generalization metrics).
+        if isinstance(self.model, FOUNDATION_KPI_MODELS) and torch.cuda.is_available():
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -374,8 +397,14 @@ class ProfitabilityPrediction(Algorithm):
                 # skl2onnx does not support LGBMRegressor — save pkl only.
                 pipeline_path = self._artifact_path("profitability_recommendation_pipeline", train_date, "pkl")
                 _save_pickle_object(self.model, pipeline_path)
-            elif isinstance(self.model, TabPFNKPIModel):
-                # skl2onnx does not support TabPFN's transformer architecture — save pkl only.
+            elif isinstance(self.model, LRKPIModel):
+                pipeline_path = self._artifact_path("profitability_recommendation_pipeline", train_date, "pkl")
+                _save_pickle_object(self.model, pipeline_path)
+            elif isinstance(self.model, FOUNDATION_KPI_MODELS):
+                # skl2onnx does not support these models' transformer architectures — save pkl only.
+                # (unreachable in practice: save_for_testing is forced off for foundation
+                # models in __init__, so save_fitted_model() is never called for them —
+                # kept for defensiveness if that ever changes.)
                 pipeline_path = self._artifact_path("profitability_recommendation_pipeline", train_date, "pkl")
                 _save_pickle_object(self.model, pipeline_path)
             else:

@@ -53,7 +53,7 @@ Arguments:
 
 ### 2. Recommendations
 
-Supported models: `rfr`, `lgbm`, `tabpfn`. `rfr`/`lgbm` use plain, untuned defaults (`RandomForestRegressor(n_estimators=n)` / `LGBMRegressor(n_estimators=n)`, everything else left at library defaults) unless you pass `tuned` (see [Hyperparameter Tuning](#2b-hyperparameter-tuning-optuna) below).
+Supported models: `rfr`, `lgbm`, `lr`, `tabpfn`, `tabicl`, `tabfm`. `rfr`/`lgbm` use plain, untuned defaults (`RandomForestRegressor(n_estimators=n)` / `LGBMRegressor(n_estimators=n)`, everything else left at library defaults) unless you pass `tuned` (see [Hyperparameter Tuning](#2b-hyperparameter-tuning-optuna) below). `lr` is a plain `LinearRegression` — no `n_estimators`; its only tunable knob is `fit_intercept`, also via `tuned`.
 
 ```bash
 python3 run_recommendation.py FAR-Trans-Data results rfr
@@ -65,21 +65,25 @@ Pass `n_estimators` and/or `kpi_type` directly:
 python3 run_recommendation.py FAR-Trans-Data results rfr 100 short
 ```
 
-`tabpfn` is internal-only and takes a `kpi_type` parameter and, optionally, a sample fraction — no `n_estimators`, and no `tuned` mode.
+`tabpfn`, `tabicl`, and `tabfm` are internal-only pretrained tabular foundation models. Each takes a `kpi_type` parameter and, optionally, a sample fraction — no `n_estimators`, and no `tuned` mode. All three default to running on GPU (`device='cuda'`) and raise if none is available.
 
 ```bash
 python3 run_recommendation.py FAR-Trans-Data results tabpfn
+python3 run_recommendation.py FAR-Trans-Data results tabicl
+python3 run_recommendation.py FAR-Trans-Data results tabfm
 ```
-Pass a fraction in `(0, 1]` as an extra model parameter to cap the widnow size — sampled proportionally per asset (min. 1 row/asset), so every asset stays represented. 
+Pass a fraction in `(0, 1]` as an extra model parameter to cap the window size — sampled proportionally per asset (min. 1 row/asset), so every asset stays represented. Applies the same way to all three:
 
 ```bash
 python3 run_recommendation.py FAR-Trans-Data results tabpfn full_short 0.25
+python3 run_recommendation.py FAR-Trans-Data results tabicl full_short 0.25
+python3 run_recommendation.py FAR-Trans-Data results tabfm full_short 0.25
 ```
 
 **Internal vs. external KPI generation:**
 
-- **Internal (default)** — RFR/LGBM generate technical indicators on the fly, per training window, directly from raw price windows. No precomputed file needed; this is what `RFRKPIModel`/`LGBMKPIModel` do.
-- **External** — technical indicators are precomputed once for the whole dataset into `<output_dir>/kpis.csv` (computed on first run, reused on later runs) and a plain `RandomForestRegressor`/`LGBMRegressor` trains directly on those columns. Pass `external` as an extra model parameter:
+- **Internal (default)** — RFR/LGBM/LR generate technical indicators on the fly, per training window, directly from raw price windows. No precomputed file needed; this is what `RFRKPIModel`/`LGBMKPIModel`/`LRKPIModel` do.
+- **External** — technical indicators are precomputed once for the whole dataset into `<output_dir>/kpis.csv` (computed on first run, reused on later runs) and a plain `RandomForestRegressor`/`LGBMRegressor`/`LinearRegression` trains directly on those columns. Pass `external` as an extra model parameter:
 
   ```bash
   python3 run_recommendation.py FAR-Trans-Data results rfr 100 full_short external
@@ -98,25 +102,28 @@ python3 recommendation.py FAR-Trans-Data prices range 2019-08-01 2021-02-26 28 1
 
 ### 2b. Hyperparameter Tuning (Optuna)
 
-Search RFR/LGBM hyperparameters with Optuna against several **expanding-window calibration folds**, then save the config that's stable across those folds for the `tuned` model parameter to pick up.
+Search RFR/LGBM/LR hyperparameters with Optuna against several **expanding-window calibration folds**, then save the config that's stable across those folds for the `tuned` model parameter to pick up.
 
 ```bash
 python3 algorithms/tune_hyperparams.py FAR-Trans-Data rfr --n-trials 20
 python3 algorithms/tune_hyperparams.py FAR-Trans-Data lgbm --n-trials 20
+python3 algorithms/tune_hyperparams.py FAR-Trans-Data lr --n-trials 20
 ```
 
 - Objective: `mean(fold_scores) - robustness_lambda * std(fold_scores)`, maximized, where each fold's score is `monthly_prof@10` (ROI) on that fold's own held-out validation window.
 - Folds are expanding windows whose validation periods all end at or before `2019-08-01`. This keeps every calibration fold strictly separate from every window whose result gets reported, so the tuning process can never leak into a "test" result.
 - The calibration horizon (`--calibration-months`, default `3`) is deliberately shorter than the real deployment horizon (6 months, `DEPLOYMENT_MONTHS`) because this dataset's pre-`2019-08-01` history isn't long enough to fit one 6-month-horizon fold. 
+- `lr` has only one binary knob (`fit_intercept`), so a handful of trials is enough to cover its whole search space — `--n-trials 20` is overkill but harmless.
 
 Apply the saved best params across all windows in both experiments:
 
 ```bash
 python3 run_recommendation.py FAR-Trans-Data results rfr tuned
 python3 run_recommendation.py FAR-Trans-Data results lgbm tuned
+python3 run_recommendation.py FAR-Trans-Data results lr tuned
 ```
 
-Requires the best-params JSON above to already exist. Produces `rfr_tuned_full_short_internal_kpis` / `lgbm_tuned_full_short_internal_kpis` results alongside (not overwriting) the untuned baseline runs.
+Requires the best-params JSON above to already exist. Produces `rfr_tuned_full_short_internal_kpis` / `lgbm_tuned_full_short_internal_kpis` / `lr_tuned_full_short_internal_kpis` results alongside (not overwriting) the untuned baseline runs.
 
 ---
 

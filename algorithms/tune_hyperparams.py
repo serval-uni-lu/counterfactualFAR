@@ -7,6 +7,7 @@ mode to pick up.
 Usage (run from anywhere; repo root is added to sys.path below):
     python3 algorithms/tune_hyperparams.py <dataset_path> rfr [--n-trials 20] [--num-folds 4] [--robustness-lambda 0.5] [--calibration-months 3] [--min-train-days 75]
     python3 algorithms/tune_hyperparams.py <dataset_path> lgbm [--n-trials 20] [--num-folds 4] [--robustness-lambda 0.5] [--calibration-months 3] [--min-train-days 75]
+    python3 algorithms/tune_hyperparams.py <dataset_path> lr [--n-trials 20] [--num-folds 4] [--robustness-lambda 0.5] [--calibration-months 3] [--min-train-days 75]
 
 Output:
     results/hyperparam_selection/{model}_full_short_optuna_results.csv        (every trial, incl. per-fold scores)
@@ -28,6 +29,7 @@ import optuna
 import pandas as pd
 
 from algorithms.lgbm_kpi_model import LGBMKPIModel
+from algorithms.lr_kpi_model import LRKPIModel
 from algorithms.rfr_kpi_model import RFRKPIModel
 from algorithms.profitability_prediction import ProfitabilityPrediction
 from data.filter.asset.asset_with_test_price import AssetWithTestPrice
@@ -44,6 +46,7 @@ from utils.constants import DEFAULT_TIMESTAMP_COL
 
 RFR = "rfr"
 LGBM = "lgbm"
+LR = "lr"
 KPI_TYPE = "full_short"
 
 DEPLOYMENT_MONTHS = 6
@@ -157,7 +160,7 @@ def _make_objective(model_id, folds, robustness_lambda, calibration_months):
                     n_estimators=n_estimators, min_samples_leaf=min_samples_leaf, max_depth=max_depth,
                     random_state=42, n_jobs=-1,
                 )
-        else:
+        elif model_id == LGBM:
             n_estimators = trial.suggest_int("n_estimators", 10, 500)
             num_leaves = trial.suggest_int("num_leaves", 2, 100)
             min_child_samples = trial.suggest_int("min_child_samples", 5, 100)
@@ -167,6 +170,14 @@ def _make_objective(model_id, folds, robustness_lambda, calibration_months):
                     k=5, kpi_type=KPI_TYPE, kpi_features=full_short_kpis,
                     n_estimators=n_estimators, num_leaves=num_leaves, min_child_samples=min_child_samples,
                     random_state=42, n_jobs=-1,
+                )
+        else:
+            fit_intercept = trial.suggest_categorical("fit_intercept", [True, False])
+
+            def make_model():
+                return LRKPIModel(
+                    k=5, kpi_type=KPI_TYPE, kpi_features=full_short_kpis,
+                    fit_intercept=fit_intercept,
                 )
 
         fold_scores = []
@@ -201,7 +212,7 @@ def _make_objective(model_id, folds, robustness_lambda, calibration_months):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("dataset_path", help="Path to the FAR-Trans dataset directory")
-    parser.add_argument("model", choices=[RFR, LGBM], help="Model to tune")
+    parser.add_argument("model", choices=[RFR, LGBM, LR], help="Model to tune")
     parser.add_argument("--n-trials", type=int, default=20)
     parser.add_argument("--num-folds", type=int, default=4,
                          help="Number of expanding-window calibration folds to average/penalize across.")
