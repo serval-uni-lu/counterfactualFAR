@@ -528,7 +528,7 @@ def _model_dir_and_date_tag(pkl_path: Path) -> tuple[str, str]:
 def _derive_output_paths(pkl_path: Path, method: str) -> tuple[Path, Path, Path]:
     """Derive the three output CSV paths from the pkl path, including the CF method."""
     model_dir, date_tag = _model_dir_and_date_tag(pkl_path)
-    out_dir = Path("counterfactuals") / model_dir
+    out_dir = Path("counterfactuals_results") / model_dir
     tag = f"{model_dir}_{date_tag}_{method}"
     return (
         out_dir / f"cf_details_{tag}.csv",

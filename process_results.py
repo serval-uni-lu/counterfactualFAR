@@ -243,7 +243,7 @@ def save_all_models_plots(all_run_stats_tables):
         plt.close(fig)
 
 
-CF_ROOT = "counterfactuals"
+CF_ROOT = "counterfactuals_results"
 _MODEL_TAG = "rfr_n-100_kpi-full_short_internal_kpis"
 
 

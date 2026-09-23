@@ -14,7 +14,7 @@ Answers 7 diagnostic questions from CF output files:
 Usage:
     python cf_analysis.py                        # all sections, default dirs
     python cf_analysis.py --sections feasibility lift
-    python cf_analysis.py --cf-dir counterfactuals/rfr_n-100_kpi-full_short_internal_kpis
+    python cf_analysis.py --cf-dir counterfactuals_results/rfr_n-100_kpi-full_short_internal_kpis
 """
 
 import argparse
@@ -28,7 +28,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from numpy.lib.stride_tricks import sliding_window_view
 
-CF_ROOT = "counterfactuals"
+CF_ROOT = "counterfactuals_results"
 _MODEL_TAG = "rfr_n-100_kpi-full_short_internal_kpis"
 OUT_ROOT = os.path.join("stats", "cf_analysis")
 

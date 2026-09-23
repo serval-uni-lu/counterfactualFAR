@@ -3,7 +3,7 @@ without re-running anything.
 
 generate_counterfactuals.py --resume already tracks completion per window: every query
 outcome (found / no_cf / skipped) writes a sentinel row to that window's
-counterfactuals/{tag}/summary_{tag}_{date}_{method}.csv, keyed by query_index. This script
+counterfactuals_results/{tag}/summary_{tag}_{date}_{method}.csv, keyed by query_index. This script
 just reads those sentinel counts back and compares them against the number of queries in
 each window's testing CSV, so you get one table for the whole sweep instead of eyeballing
 each window's log/output individually.
