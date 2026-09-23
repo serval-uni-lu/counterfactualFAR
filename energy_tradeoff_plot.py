@@ -43,15 +43,27 @@ GRAY = "#898781"
 FOUNDATION_MODEL_FAMILIES = ["tabpfn", "tabicl", "tabfm"]
 
 
+def _version_prefix(run_prefix, fam):
+    # process_results.py namespaces stats filenames by results/ subfolder whenever
+    # that folder's name doesn't already match the run's own prefix — e.g. both
+    # results/tabpfn/ and results/tabpfn_v2.5/ produce "tabpfn_..." run prefixes,
+    # so tabpfn_v2.5's stats get a "tabpfn_v2.5_" prefix to stay distinct. Surface
+    # that prefix in the label so the two versions aren't shown under one name.
+    m = re.match(rf"^({re.escape(fam)}_v[\d.]+)_", run_prefix)
+    return m.group(1) if m else fam
+
+
 def _display_name(run_prefix):
     for fam in FOUNDATION_MODEL_FAMILIES:
         m = re.search(rf"_{fam}_sample([\d.]+)$", run_prefix)
         if m:
-            return f"{fam} (sample {m.group(1)})"
+            return f"{_version_prefix(run_prefix, fam)} (sample {m.group(1)})"
     if run_prefix.startswith("rfr_tuned"):
         return "rfr (tuned)"
     if run_prefix.startswith("lgbm_tuned"):
         return "lgbm (tuned)"
+    if run_prefix.startswith("lgbm_default"):
+        return "lgbm (default)"
     if run_prefix.startswith("lr_tuned"):
         return "lr (tuned)"
     if run_prefix.startswith("lr_default"):
@@ -63,14 +75,14 @@ def _sort_key(run_prefix):
     for i, fam in enumerate(FOUNDATION_MODEL_FAMILIES):
         m = re.search(rf"_{fam}_sample([\d.]+)$", run_prefix)
         if m:
-            return (2 + i, float(m.group(1)))
+            return (2 + i, _version_prefix(run_prefix, fam), float(m.group(1)))
     if run_prefix.startswith("rfr_tuned"):
-        return (0, 0)
-    if run_prefix.startswith("lgbm_tuned"):
-        return (0, 1)
+        return (0, "", 0)
+    if run_prefix.startswith("lgbm_tuned") or run_prefix.startswith("lgbm_default"):
+        return (0, "", 1)
     if run_prefix.startswith("lr_tuned") or run_prefix.startswith("lr_default"):
-        return (0, 2)
-    return (0, 3)
+        return (0, "", 2)
+    return (0, "", 3)
 
 
 def load_means():

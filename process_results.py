@@ -686,21 +686,31 @@ def main():
                     print(f"Skipping {run_prefix}: no matching per-window metrics files")
                     continue
 
+                # run_prefix comes from get_name() in recommendation.py, which has no
+                # notion of which results/ subfolder a run came from — e.g. both
+                # results/tabpfn/ and results/tabpfn_v2.5/ produce the same run_prefix
+                # ("tabpfn_..."), so writing straight to f"{run_prefix}.csv" lets one
+                # silently overwrite the other's stats (and collide under the same
+                # label in the all-models plots). Namespace by model_name whenever
+                # run_prefix doesn't already start with it, so already-correct runs
+                # (the common case) keep their existing, unprefixed filenames.
+                stats_name = run_prefix if run_prefix.startswith(model_name) else f"{model_name}_{run_prefix}"
+
                 found_any = True
                 full_stats = compute_full_stats_per_metric(all_metrics)
-                output_file = os.path.join(model_stats_dir, f"{run_prefix}.csv")
+                output_file = os.path.join(model_stats_dir, f"{stats_name}.csv")
                 full_stats.to_csv(output_file, index=False)
-                run_stats_tables.append((run_prefix, full_stats))
-                all_run_stats_tables.append((run_prefix, full_stats))
-                all_run_metrics.append((run_prefix, all_metrics))
+                run_stats_tables.append((stats_name, full_stats))
+                all_run_stats_tables.append((stats_name, full_stats))
+                all_run_metrics.append((stats_name, all_metrics))
 
                 # Per-experiment stats (including unclassified if present)
                 for exp_label, exp_df in all_metrics.groupby("experiment"):
                     exp_stats = compute_full_stats_per_metric(exp_df)
-                    exp_output_file = os.path.join(model_stats_dir, f"{run_prefix}_{exp_label}.csv")
+                    exp_output_file = os.path.join(model_stats_dir, f"{stats_name}_{exp_label}.csv")
                     exp_stats.to_csv(exp_output_file, index=False)
 
-                print(f"Model run: {run_prefix}")
+                print(f"Model run: {stats_name}")
                 print(f"  Windows used: {len(metric_files)}")
                 print(f"  Saved stats: {output_file}")
                 print(f"  Saved per-experiment stats in: {model_stats_dir}")
