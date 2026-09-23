@@ -40,26 +40,37 @@ PERF_UP, PERF_DOWN = "#0ca30c", "#eb6834"          # green / orange
 GRAY = "#898781"
 
 
+FOUNDATION_MODEL_FAMILIES = ["tabpfn", "tabicl", "tabfm"]
+
+
 def _display_name(run_prefix):
-    m = re.search(r"tabpfn_sample([\d.]+)$", run_prefix)
-    if m:
-        return f"tabpfn (sample {m.group(1)})"
+    for fam in FOUNDATION_MODEL_FAMILIES:
+        m = re.search(rf"_{fam}_sample([\d.]+)$", run_prefix)
+        if m:
+            return f"{fam} (sample {m.group(1)})"
     if run_prefix.startswith("rfr_tuned"):
         return "rfr (tuned)"
     if run_prefix.startswith("lgbm_tuned"):
         return "lgbm (tuned)"
+    if run_prefix.startswith("lr_tuned"):
+        return "lr (tuned)"
+    if run_prefix.startswith("lr_default"):
+        return "lr (default)"
     return run_prefix
 
 
 def _sort_key(run_prefix):
-    m = re.search(r"tabpfn_sample([\d.]+)$", run_prefix)
-    if m:
-        return (1, float(m.group(1)))
+    for i, fam in enumerate(FOUNDATION_MODEL_FAMILIES):
+        m = re.search(rf"_{fam}_sample([\d.]+)$", run_prefix)
+        if m:
+            return (2 + i, float(m.group(1)))
     if run_prefix.startswith("rfr_tuned"):
         return (0, 0)
     if run_prefix.startswith("lgbm_tuned"):
         return (0, 1)
-    return (0, 2)
+    if run_prefix.startswith("lr_tuned") or run_prefix.startswith("lr_default"):
+        return (0, 2)
+    return (0, 3)
 
 
 def load_means():
