@@ -69,15 +69,11 @@ python3 run_recommendation.py FAR-Trans-Data results rfr 100 short
 
 ```bash
 python3 run_recommendation.py FAR-Trans-Data results tabpfn
-python3 run_recommendation.py FAR-Trans-Data results tabicl
-python3 run_recommendation.py FAR-Trans-Data results tabfm
 ```
 Pass a fraction in `(0, 1]` as an extra model parameter to cap the window size — sampled proportionally per asset (min. 1 row/asset), so every asset stays represented. Applies the same way to all three:
 
 ```bash
 python3 run_recommendation.py FAR-Trans-Data results tabpfn full_short 0.25
-python3 run_recommendation.py FAR-Trans-Data results tabicl full_short 0.25
-python3 run_recommendation.py FAR-Trans-Data results tabfm full_short 0.25
 ```
 
 **Internal vs. external KPI generation:**
@@ -106,8 +102,6 @@ Search RFR/LGBM/LR hyperparameters with Optuna against several **expanding-windo
 
 ```bash
 python3 algorithms/tune_hyperparams.py FAR-Trans-Data rfr --n-trials 20
-python3 algorithms/tune_hyperparams.py FAR-Trans-Data lgbm --n-trials 20
-python3 algorithms/tune_hyperparams.py FAR-Trans-Data lr --n-trials 20
 ```
 
 - Objective: `mean(fold_scores) - robustness_lambda * std(fold_scores)`, maximized, where each fold's score is `monthly_prof@10` (ROI) on that fold's own held-out validation window.
@@ -119,8 +113,6 @@ Apply the saved best params across all windows in both experiments:
 
 ```bash
 python3 run_recommendation.py FAR-Trans-Data results rfr tuned
-python3 run_recommendation.py FAR-Trans-Data results lgbm tuned
-python3 run_recommendation.py FAR-Trans-Data results lr tuned
 ```
 
 Requires the best-params JSON above to already exist. Produces `rfr_tuned_full_short_internal_kpis` / `lgbm_tuned_full_short_internal_kpis` / `lr_tuned_full_short_internal_kpis` results alongside (not overwriting) the untuned baseline runs.
@@ -140,19 +132,19 @@ python3 process_results.py model
 By default, runs **every tuned model found** under `artifacts_for_counterfactuals/` (one subdirectory per model), for the last window of each experiment (exp1: `2020-08-28`, exp2: `2021-11-23`). Training/testing CSVs and output paths are auto-derived from the model pickle filename. The script prints how many models it found and how many models × windows it's about to run.
 
 ```bash
-python3 generate_counterfactuals.py
+python3 counterfactuals_generation/generate_counterfactuals.py
 ```
 
 Run for a single model tag (all default windows):
 
 ```bash
-python3 generate_counterfactuals.py --model-tag rfr_n-100_kpi-full_short_internal_kpis
+python3 counterfactuals_generation/generate_counterfactuals.py --model-tag rfr_n-100_kpi-full_short_internal_kpis
 ```
 
 Run for a single model tag and a specific window:
 
 ```bash
-python3 generate_counterfactuals.py \
+python3 counterfactuals_generation/generate_counterfactuals.py \
   --model-tag rfr_n-100_kpi-full_short_internal_kpis \
   --window-date 2020-08-28
 ```
@@ -162,8 +154,14 @@ python3 generate_counterfactuals.py \
 To bypass model-tag/window resolution entirely and point at an exact pickle, use `--model-pkl` (still supported, one or more paths):
 
 ```bash
-python3 generate_counterfactuals.py \
+python3 counterfactuals_generation/generate_counterfactuals.py \
   --model-pkl artifacts_for_counterfactuals/rfr_n-100_kpi-full_short_internal_kpis/profitability_recommendation_pipeline_2020-08-28_00-00-00_rfr_n-100_kpi-full_short_internal_kpis.pkl
+```
+
+Output lands under `counterfactuals_results/<model_tag>/` (formerly `counterfactuals/`). Progress across all model tags/windows can be checked without re-running anything:
+
+```bash
+python3 counterfactuals_generation/check_cf_progress.py
 ```
 
 Reproducibility: the search is seeded per query (`--seed`, default 42), but that only guarantees identical results with `--n-jobs 1` — DiCE's genetic/random explainers draw from the global `random`/`np.random` state, so concurrent worker threads interleave draws unpredictably regardless of seeding.
