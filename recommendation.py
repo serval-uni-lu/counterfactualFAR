@@ -130,7 +130,9 @@ def _parse_rfr_params(params):
 
 
 def _parse_lgbm_params(params):
-    n = 100
+    # n stays None unless explicitly given: an untuned run with no number should
+    # use LGBMRegressor's own library default, not a value pinned in this code.
+    n = None
     kpi_type = "full_short"
     use_internal = True
     tuned = False
@@ -535,7 +537,7 @@ def regressor(model_id, param, financial_data, recommendation_date, eval_metrics
                     num_leaves=best["num_leaves"],
                     min_child_samples=best["min_child_samples"],
                 )
-            else:
+            elif n is not None:
                 lgbm_kwargs["n_estimators"] = n
             alg_model = LGBMKPIModel(**lgbm_kwargs)
         else:
@@ -589,7 +591,7 @@ def get_name(rec_model, param):
 
     if rec_model == LGBM:
         n, kpi_type, use_internal_lgbm, tuned = _parse_lgbm_params(param)
-        name_n = "tuned" if tuned else str(n)
+        name_n = "tuned" if tuned else (str(n) if n is not None else "default")
         algorithm_name = LGBM + "_" + name_n + "_" + kpi_type
         if use_internal_lgbm:
             algorithm_name += "_internal_kpis"

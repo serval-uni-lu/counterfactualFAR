@@ -63,7 +63,8 @@ if __name__ == "__main__":
             if model_params:
                 model_config = ("lgbm", "lgbm", *model_params)
             else:
-                model_config = ("lgbm", "lgbm", "100", "full_short")
+                # No n_estimators here: let LGBMRegressor's own library default apply.
+                model_config = ("lgbm", "lgbm", "full_short")
         elif model_id == "tabpfn":
             if model_params:
                 model_config = ("tabpfn", "tabpfn", *model_params)

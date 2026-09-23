@@ -17,7 +17,7 @@ class LGBMKPIModel:
 
     def __init__(
         self,
-        n_estimators=100,
+        n_estimators=None,
         k=5,
         kpi_type="full_short",
         kpi_features=None,
@@ -26,7 +26,10 @@ class LGBMKPIModel:
         min_child_samples=20,
         n_jobs=-1,
     ):
-        self.n_estimators = int(n_estimators)
+        # n_estimators stays None unless explicitly given, so the untuned default
+        # falls through to LGBMRegressor's own library default instead of a value
+        # pinned in this code (and tracks that library default if it ever changes).
+        self.n_estimators = None if n_estimators is None else int(n_estimators)
         self.k = k
         self.kpi_type = kpi_type
         self.kpi_features = kpi_features
@@ -36,17 +39,19 @@ class LGBMKPIModel:
         self.n_jobs = n_jobs
 
         self.transformer = KPIFeatureTransformer(k=k, kpi_type=kpi_type, kpi_features=kpi_features)
+        lgbm_kwargs = dict(
+            num_leaves=self.num_leaves,
+            min_child_samples=self.min_child_samples,
+            n_jobs=self.n_jobs,
+            random_state=self.random_state,
+            verbose=-1,
+        )
+        if self.n_estimators is not None:
+            lgbm_kwargs["n_estimators"] = self.n_estimators
         self.pipeline = Pipeline(
             steps=[
                 ("kpi", self.transformer),
-                ("lgbm", LGBMRegressor(
-                    n_estimators=self.n_estimators,
-                    num_leaves=self.num_leaves,
-                    min_child_samples=self.min_child_samples,
-                    n_jobs=self.n_jobs,
-                    random_state=self.random_state,
-                    verbose=-1,
-                )),
+                ("lgbm", LGBMRegressor(**lgbm_kwargs)),
             ]
         )
         self.model = self.pipeline.named_steps["lgbm"]

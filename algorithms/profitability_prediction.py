@@ -98,7 +98,8 @@ class ProfitabilityPrediction(Algorithm):
             return self._safe_fragment(f"n-{n_estimators}_kpi-{kpi_type}_internal_kpis")
 
         if isinstance(self.model, LGBMKPIModel):
-            n_estimators = getattr(self.model, "n_estimators", "na")
+            n_estimators = getattr(self.model, "n_estimators", None)
+            n_estimators = "default" if n_estimators is None else n_estimators
             kpi_type = getattr(self.model, "kpi_type", "na")
             num_leaves = getattr(self.model, "num_leaves", 31)
             min_child_samples = getattr(self.model, "min_child_samples", 20)
