@@ -483,8 +483,10 @@ def section_data_utility(cf_files, out_dir, artifacts_dir=None, model_tag=None):
         print(f"\n[{label}] Terminal price, all {len(price_f_all)} found CFs (real vs CF, pooled):")
         print(f"  median relative change {100 * np.median(price_rel_all):+.3f}%  |  "
               f"p10={100 * np.percentile(price_rel_all, 10):+.2f}%  "
-              f"p90={100 * np.percentile(price_rel_all, 90):+.2f}%  |  "
-              f"CF price higher than real: {100 * (price_rel_all > 0).mean():.1f}%")
+              f"p90={100 * np.percentile(price_rel_all, 90):+.2f}%")
+        print(f"  CF price lower: {100 * (price_rel_all < 0).mean():.1f}%  |  "
+              f"higher: {100 * (price_rel_all > 0).mean():.1f}%  |  "
+              f"exactly unchanged: {100 * (price_rel_all == 0).mean():.1f}%")
 
         fig_p, axes_p = plt.subplots(1, 2, figsize=(13, 5))
 

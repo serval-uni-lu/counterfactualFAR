@@ -11,11 +11,15 @@ import json
 import pickle
 import random
 import re
+import sys
 import time
 import os
 from pathlib import Path
 from threading import local, Lock
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO_ROOT)
 
 import dice_ml
 import numpy as np
