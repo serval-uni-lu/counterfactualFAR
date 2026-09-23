@@ -10,8 +10,9 @@ Usage (run from anywhere; repo root is added to sys.path below):
     python3 algorithms/tune_hyperparams.py <dataset_path> lr [--n-trials 20] [--num-folds 4] [--robustness-lambda 0.5] [--calibration-months 3] [--min-train-days 75]
 
 Output:
-    results/hyperparam_selection/{model}_full_short_optuna_results.csv        (every trial, incl. per-fold scores)
-    results/hyperparam_selection/{model}_full_short_optuna_results_best.json  (best trial's params + fold metadata)
+    results/hyperparam_selection/{model}_full_short_optuna_results.csv        (every trial, incl. per-fold scores and energy)
+    results/hyperparam_selection/{model}_full_short_optuna_results_best.json  (best trial's params + fold metadata + energy)
+    results/hyperparam_selection/{model}_full_short_trial{N}_emissions.csv    (raw codecarbon output per trial)
 """
 
 import argparse
@@ -27,6 +28,7 @@ sys.path.insert(0, _REPO_ROOT)
 import numpy as np
 import optuna
 import pandas as pd
+from codecarbon import EmissionsTracker
 
 from algorithms.lgbm_kpi_model import LGBMKPIModel
 from algorithms.lr_kpi_model import LRKPIModel
@@ -180,6 +182,25 @@ def _make_objective(model_id, folds, robustness_lambda, calibration_months):
                     fit_intercept=fit_intercept,
                 )
 
+        # Energy/CO2 tracking spans every fold in this trial (best-effort, mirrors
+        # recommendation.py's test(): a node without RAPL/GPU access or internet for
+        # the geolocation lookup shouldn't fail the trial, just skip its energy columns).
+        energy_metrics = {}
+        emissions_path = os.path.join(OUTPUT_DIR, f"{model_id}_{KPI_TYPE}_trial{trial.number}_emissions.csv")
+        tracker = None
+        try:
+            tracker = EmissionsTracker(
+                output_dir=os.path.dirname(emissions_path) or ".",
+                output_file=os.path.basename(emissions_path),
+                measure_power_secs=1,
+                log_level="error",
+                tracking_mode="process",
+            )
+            tracker.start()
+        except Exception as exc:
+            print(f"WARNING: Could not start energy tracker for trial {trial.number}: {exc}", flush=True)
+            tracker = None
+
         fold_scores = []
         for splitted_data, rec_date, monthly_metric in folds:
             algorithm = ProfitabilityPrediction(
@@ -197,6 +218,23 @@ def _make_objective(model_id, folds, robustness_lambda, calibration_months):
             cutoff_results = monthly_metric.evaluate_cutoffs(recs, [10], splitted_data.users, True)
             _, monthly_prof_10 = cutoff_results[10]
             fold_scores.append(float(monthly_prof_10))
+
+        if tracker is not None:
+            try:
+                tracker.stop()
+                emissions_df = pd.read_csv(emissions_path)
+                last_run = emissions_df.iloc[-1]
+                energy_metrics = {
+                    "energy_consumed_kwh": float(last_run["energy_consumed"]),
+                    "cpu_energy_kwh": float(last_run["cpu_energy"]),
+                    "gpu_energy_kwh": float(last_run["gpu_energy"]),
+                    "ram_energy_kwh": float(last_run["ram_energy"]),
+                }
+            except Exception as exc:
+                print(f"WARNING: Could not read energy tracking results for trial {trial.number}: {exc}", flush=True)
+
+        for key, val in energy_metrics.items():
+            trial.set_user_attr(key, val)
 
         fold_scores = np.array(fold_scores, dtype=float)
         mean_score = float(fold_scores.mean())
@@ -256,6 +294,14 @@ def main():
     trials_df.to_csv(trials_csv, index=False)
     print(f"Wrote {len(trials_df)} trials to {trials_csv}")
 
+    energy_metric_names = ["energy_consumed_kwh", "cpu_energy_kwh", "gpu_energy_kwh", "ram_energy_kwh"]
+    # Sum across every trial (missing/failed-tracker trials count as 0) — the
+    # total cost of this whole tuning run, not just the winning trial.
+    total_energy = {
+        f"total_tuning_{name}": float(trials_df.get(f"user_attrs_{name}", pd.Series(dtype=float)).fillna(0).sum())
+        for name in energy_metric_names
+    }
+
     best_params = {
         "model": args.model,
         "kpi_type": KPI_TYPE,
@@ -266,10 +312,15 @@ def main():
         "calibration_months": args.calibration_months,
         "fold_origins": [str(o.date()) for o in origins],
         "fold_scores": study.best_trial.user_attrs.get("fold_scores"),
+        **{name: study.best_trial.user_attrs.get(name) for name in energy_metric_names},
+        **total_energy,
     }
     best_json = os.path.join(OUTPUT_DIR, f"{args.model}_{KPI_TYPE}_optuna_results_best.json")
     with open(best_json, "w") as handle:
         json.dump(best_params, handle, indent=2)
+
+    print(f"Total tuning energy consumed: {total_energy['total_tuning_energy_consumed_kwh']:.6f} kWh "
+          f"across {len(trials_df)} trials.")
 
     print(f"Best objective (mean - {args.robustness_lambda}*std) = {study.best_value:.6f}, "
           f"fold scores = {study.best_trial.user_attrs.get('fold_scores')}, params saved to {best_json}")
