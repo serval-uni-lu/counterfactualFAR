@@ -301,3 +301,41 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def _is_codecarbon_teardown_race(exc_type, exc_traceback):
+    """codecarbon's PeriodicScheduler.stop() cancels its threading.Timer, but
+    Timer.cancel() cannot abort a tick that has already fired and is mid-flight
+    on its own thread (see codecarbon/external/scheduler.py's _run()/stop()).
+    That stray tick can call EmissionsTracker._measure_power_and_energy() after
+    stop() has already nulled self._start_time, raising this exact TypeError.
+    Harmless: stop() already computed and persisted real emissions data earlier
+    in the same call, before nulling that state — this is just a late, unused poll.
+    """
+    if exc_type is not TypeError:
+        return False
+    tb = exc_traceback
+    while tb is not None:
+        if "codecarbon" in tb.tb_frame.f_code.co_filename:
+            return True
+        tb = tb.tb_next
+    return False
+
+
+def suppress_codecarbon_teardown_race():
+    """Install a threading.excepthook that silences the known-harmless codecarbon
+    scheduler teardown race (see _is_codecarbon_teardown_race) so it doesn't spam
+    stderr on every EmissionsTracker.stop() call, while letting any other
+    exception raised on a background thread surface exactly as it normally would.
+    Safe to call more than once (each call wraps whatever hook is currently
+    installed); one call per process is enough."""
+    import threading
+
+    previous_hook = threading.excepthook
+
+    def _hook(args):
+        if _is_codecarbon_teardown_race(args.exc_type, args.exc_traceback):
+            return
+        previous_hook(args)
+
+    threading.excepthook = _hook
