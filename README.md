@@ -24,6 +24,14 @@ pipenv install
 pipenv shell
 ```
 
+Then install TabFM from source:
+
+```bash
+git clone https://github.com/google-research/tabfm.git
+cd tabfm
+pip install -e .[pytorch]
+```
+
 ---
 
 ## Usage
