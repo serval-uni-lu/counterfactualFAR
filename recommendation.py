@@ -22,10 +22,13 @@ import numpy as np
 import pandas as pd
 import wandb
 from utils.constants import DEFAULT_TIMESTAMP_COL, DEFAULT_ITEM_COL, DEFAULT_RATING_COL, DEFAULT_USER_COL
+from utils.common_util import suppress_codecarbon_teardown_race
 from codecarbon import EmissionsTracker
 from lightgbm import LGBMRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
+
+suppress_codecarbon_teardown_race()
 
 try:
     pd.set_option("future.infer_string", False)
