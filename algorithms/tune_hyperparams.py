@@ -45,6 +45,9 @@ from data.financial_interaction_data import FinancialInteractionData
 from metrics.kpi_monthly_evaluation_metric import MonthlyKPIEvaluationMetric
 from recommendation import compute_profitability, full_short_kpis
 from utils.constants import DEFAULT_TIMESTAMP_COL
+from utils.common_util import suppress_codecarbon_teardown_race
+
+suppress_codecarbon_teardown_race()
 
 RFR = "rfr"
 LGBM = "lgbm"
