@@ -133,6 +133,10 @@ Requires the best-params JSON above to already exist. Produces `rfr_tuned_full_s
 python3 process_results.py model
 ```
 
+```bash
+python3 energy_tradeoff_plot.py
+```
+
 ---
 
 ### 4. Generate Counterfactuals
@@ -202,33 +206,6 @@ python3 process_results.py cf --asset-id <ASSET_ID> --query-index <N>
 
 ---
 
-### 6. Membership Inference Attacks
+### 6. Trustworthiness Eval
 
-The valid test-period rows are split 50/50 (stratified per asset): one half is audited
-as non-members, the other half is held out purely as the population reference used by
-the population attack. Members are then downsampled to match the non-member count, so
-both classes are balanced. `loss.py` and `population_attack.py` audit the
-same member/non-member rows.
-
-**LOSS attack** — a sample is predicted "member" when its loss is unusually low
-(Yeom et al.):
-
-```bash
-python3 membership_inference/loss.py --model rfr_n-100_kpi-full_short_internal_kpis --dates 2020-08-28,2021-11-23
-```
-
-**Population attack** — each audited sample is scored by where its loss falls within
-the population loss distribution:
-
-```bash
-python3 membership_inference/population_attack.py --model rfr_n-100_kpi-full_short_internal_kpis
-```
-
-Output per date: `member_scores.csv`, `nonmember_scores.csv` (plus `population_scores.csv`
-for the population attack), and `metrics.json` (ROC-AUC, accuracy at the best threshold,
-attack advantage).
-
-Each run also saves plots to `stats/membership_inference/{loss_attack,population_attack}/<model>/`:
-an ROC curve (linear + log-log) and a loss-distribution histogram per date, a
-percentile-rank histogram per date for the population attack, and (when more than one
-date is run) an AUC/attack-advantage trend plot across dates.
+Evaluations live under `trustworthiness_eval/` folder
