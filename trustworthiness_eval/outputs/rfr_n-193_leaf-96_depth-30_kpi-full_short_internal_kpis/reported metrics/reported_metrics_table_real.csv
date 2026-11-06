@@ -1,0 +1,56 @@
+Property,Metric,Value,Reference or threshold,Check,Basis
+Accuracy,R² of the 6-month return prediction (test rows),-0.240,0 = predicting the average,,mean of 61 time points
+Accuracy,RMSE (test rows),34.3%,percentage points of return,,mean of 61 time points
+Accuracy,MAE (test rows),17.8%,percentage points of return,,mean of 61 time points
+Accuracy,nDCG@10,0.021,random 0.011,pass,mean of 61 time points
+Accuracy,Monthly ROI@10,2.7%,risk-matched market 0.16%; market 0.79%; customer average -1.1%,pass,mean of 61 time points
+Accuracy,SR@10 (Sharpe ratio),1.233,risk-matched market 0.682; market 1.658,pass,mean of 61 time points
+Accuracy,Vol@10 (annualised volatility),60.2%,,,mean of 61 time points
+Accuracy,%prof@10,65.2%,,,mean of 61 time points
+Suitability,"SVR@10, filtered list",0.0%,must be 0 at every time point (max 0.0%); conditional if it fails under the sensitivity classifications,conditional pass,mean of 61 time points
+Suitability,"SVR@10, filtered, 1-year volatility window",24.0%,"sensitivity check, not binding: above 0 makes the pass conditional",,mean of 61 time points
+Suitability,"SVR@10, filtered, limits one class stricter",77.6%,"sensitivity check, not binding: above 0 makes the pass conditional",,mean of 61 time points
+Suitability,"SVR@10, unfiltered ranking",80.9%,,,mean of 61 time points
+Suitability,Customers with an unsuitable asset (unfiltered),81.5%,,,mean of 61 time points
+Suitability,Assets that changed class since the previous time point,1.7%,,,mean of 61 time points
+Suitability,Assets within 10% of a class boundary,27.1%,,,mean of 61 time points
+Fairness,nDCG@10 gap by segment,0.008,0 = parity; significant at 5% of time points,,mean of 61 time points
+Fairness,nDCG@10 gap by capacity band,0.013,0 = parity; significant at 5% of time points,,mean of 61 time points
+Fairness,nDCG@10 gap by risk profile,0.011,0 = parity; significant at 5% of time points,,mean of 61 time points
+Fairness,SVR@10 (unfiltered) gap by segment,22.5%,0 = parity; significant at 100% of time points,,mean of 61 time points
+Fairness,SVR@10 (unfiltered) gap by capacity band,46.3%,0 = parity; significant at 100% of time points,,mean of 61 time points
+Fairness,SVR@10 (unfiltered) gap by risk profile,100%,0 = parity; significant at 100% of time points,,mean of 61 time points
+Fairness,"Monthly ROI@10 gap within risk profile, by segment",0.05%,0 = parity,,mean of 61 time points
+Fairness,"Monthly ROI@10 gap within risk profile, by capacity band",0.08%,0 = parity,,mean of 61 time points
+Fairness,Gini of exposure (top-10),0.981,"0 = even, 1 = concentrated",,mean of 61 time points
+Fairness,Catalogue coverage (top-10),3.2%,,,mean of 61 time points
+Fairness,In-house share / eligible share,0.050,1 = proportional,,mean of 61 time points
+Fairness,"%prof@10, in-house products",50.0%,,,mean of 61 time points
+Fairness,"%prof@10, third-party products",65.1%,,,mean of 61 time points
+Robustness,"nDCG@10, calm vs stress",0.026 vs 0.010 (drop 63%),worst time point 0.001,,mean of 61 time points
+Robustness,"Monthly ROI@10, calm vs stress",3.7% vs 0.59% (drop 84%),worst time point -3.1%,,mean of 61 time points
+Robustness,"SR@10, calm vs stress",1.636 vs 0.343 (drop 79%),worst time point -1.214,,mean of 61 time points
+Robustness,"J@10 before vs after, equity shock",0.299,1 = unchanged,,mean of 61 time points
+Robustness,"SVR@10 under equity shock, filtered",0.0%,must be 0 (max 0.0%),pass,mean of 61 time points
+Robustness,"Assets moved to a higher risk class, equity shock",6.3%,,,mean of 61 time points
+Robustness,"J@10 before vs after, rates shock",0.621,1 = unchanged,,mean of 61 time points
+Robustness,"SVR@10 under rates shock, filtered",0.0%,must be 0 (max 0.0%),pass,mean of 61 time points
+Robustness,"Assets moved to a higher risk class, rates shock",1.7%,,,mean of 61 time points
+Robustness,"J@10 before vs after, combined shock",0.166,1 = unchanged,,mean of 61 time points
+Robustness,"SVR@10 under combined shock, filtered",0.0%,must be 0 (max 0.0%),pass,mean of 61 time points
+Robustness,"Assets moved to a higher risk class, combined shock",8.0%,,,mean of 61 time points
+Transparency,"Counterfactual validity, re-checked end to end",93.1%,,,mean of 61 time points
+Transparency,Counterfactual proximity (median relative price change),1.2%,,,mean of 61 time points
+Transparency,Counterfactual sparsity (share of the 21 prices changed),92.6%,below 50% = actionable,,mean of 61 time points
+Transparency,Counterfactual plausibility,94.1%,,,mean of 61 time points
+Transparency,"SHAP stability, Spearman (noise 0.1%)",0.974,1 = identical,,mean of 61 time points
+Transparency,"SHAP stability, top-5 overlap (noise 0.1%)",0.933,1 = identical,,mean of 61 time points
+Transparency,"SHAP stability, Spearman (noise 0.25%)",0.941,1 = identical,,mean of 61 time points
+Transparency,"SHAP stability, top-5 overlap (noise 0.25%)",0.866,1 = identical,,mean of 61 time points
+Transparency,"SHAP stability, Spearman (2% days dropped)",0.983,1 = identical,,mean of 61 time points
+Transparency,"SHAP stability, top-5 overlap (2% days dropped)",0.951,1 = identical,,mean of 61 time points
+Transparency,"SHAP faithfulness, top 1 vs random",8.289,above 1 = faithful,,mean of 61 time points
+Transparency,"SHAP faithfulness, top 5 vs random",3.137,above 1 = faithful,,mean of 61 time points
+Transparency,"SHAP faithfulness, top 10 vs random",1.946,above 1 = faithful,,mean of 61 time points
+Monitoring,PSI of the model score,0.155,review above 0.25,,mean of 61 time points
+Monitoring,Highest PSI among the 5 most important features,0.427,review above 0.25; triggered at 29 of 61 time points,,mean of 61 time points

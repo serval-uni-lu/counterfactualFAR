@@ -24,6 +24,7 @@ tabpfn = "==9.0.0"
 wandb = "*"
 tabicl = "*"
 tabfm = "*"
+shap = "*"
 
 [dev-packages]
 

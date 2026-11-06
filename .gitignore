@@ -219,6 +219,17 @@ artifacts_for_counterfactuals
 stats/plots/cf/cf_timeseries_*
 stats/plots/prices/
 stats/plots/model_single_window/
+counterfactuals_results/rfr_n-193_leaf-96_depth-30_kpi-full_short_internal_kpis
+counterfactuals_results/rfr_n-100_kpi-full_short_internal_kpis_local
+# Trustworthiness eval: membership inference results (large) and per-date resume caches
+trustworthiness_eval/privacy/membership_inference/results/
+trustworthiness_eval/outputs/**/*by_date*/
+
+trustworthiness_eval/privacy/membership_inference/results/   # 6 GB attack results
+trustworthiness_eval/outputs/**/*by_date*/                   # per-date resume caches
+far-trans/                                                   # copy of the upstream FAR-Trans repo, not used
+stats/plots/holdings_inference/                              # old holdings plots (rfr_n-100)
+stats/plots/membership_inference/ 
 
 # Weights & Biases local run logs
 wandb/

@@ -56,6 +56,7 @@ from metrics.kpi_ann_evaluation_metric import AnnualizedKPIEvaluationMetric
 from metrics.kpi_evaluation_metric import KPIEvaluationMetric
 from metrics.kpi_monthly_evaluation_metric import MonthlyKPIEvaluationMetric
 from metrics.pure_ndcg import PureNDCG
+from metrics.risk_metrics import risk_metrics
 
 pd.options.mode.chained_assignment = None  # default='warn'
 
@@ -406,8 +407,10 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
     for metric in eval_metrics:
         print("Started metric " + metric[0] + " for " + file)
 
-        metric_dict = metric[1].evaluate_cutoffs(recs, cutoffs, customers, True)
+        metric_dict = metric[1].evaluate_cutoffs(recs, list(cutoffs), customers, True)
         for cutoff in cutoffs:
+            if cutoff not in metric_dict:  # reference-only entries (e.g. market) have no cutoffs
+                continue
             metric_name = metric[0] + "@" + str(cutoff)
             metric_res[metric_name] = metric_dict[cutoff]
         time_elapsed = dt.datetime.now() - timeaa
@@ -417,9 +420,18 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
     print("Metrics computed for algorithm " + file + " (" + '{}'.format(time_elapsed) + ")")
 
     # Output the metrics:
+    # Per-window reference values (e.g. the market's SR) and detail tables (e.g. SVR violations).
+    reference_metrics = {}
+    for name, metric in eval_metrics:
+        reference_metrics.update(getattr(metric, "reference_values", dict)())
+        for suffix, table in getattr(metric, "extra_tables", dict)().items():
+            table.to_csv(file + "_" + suffix + ".csv", index=False)
+
     f = open(file + "_metrics.csv", "w")
     for key, val in metric_res.items():
         f.write(key + "\t" + str(val[1]) + "\n")
+    for key, val in reference_metrics.items():
+        f.write(key + "\t" + str(val) + "\n")
     # Computational cost
     timing_metrics = {
         "train_seconds": train_seconds,
@@ -444,6 +456,7 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
 
     wandb.log({
         **{key: val[1] for key, val in metric_res.items()},
+        **reference_metrics,
         **timing_metrics,
         **energy_metrics,
         **gen_metrics,
@@ -459,7 +472,9 @@ def test(algorithm, eval_metrics, file, recomm_date, customers):
             cust_metric_df = val[0].rename(columns={"metric" : key})
         else:
             aux_df = val[0].rename(columns={"metric": key})
-            cust_metric_df = cust_metric_df.merge(aux_df, on=DEFAULT_USER_COL)
+            # Left join: metrics defined only for some customers (SVR needs a risk profile, SR a
+            # priced asset, filtered metrics a suitable asset) must not drop rows from the others.
+            cust_metric_df = cust_metric_df.merge(aux_df, on=DEFAULT_USER_COL, how="left")
     cust_metric_df.to_csv(file + "_customers.csv", index=False)
 
     time_elapsed = dt.datetime.now() - timea
@@ -718,6 +733,11 @@ if __name__ == "__main__":
 
     parser.add_argument("interactions", help="Customer-asset transaction data file.")
     parser.add_argument("time_series", help="Asset pricing data file.")
+    parser.add_argument("--customer-info", default=None,
+                        help="customer_information.csv with risk profiles, for SVR@k and the suitability filter "
+                             "(default: next to the interactions file; metrics are skipped if it is missing).")
+    parser.add_argument("--risk-free", type=float, default=0.0,
+                        help="annual risk-free rate for SR@k (0.02 for 2%%).")
     subparsers = parser.add_subparsers(title='date_format', help='Data choice format.', dest='date_format')
 
     parser_range = subparsers.add_parser('range', help='Range of dates to use. This mode divides the dataset as '
@@ -779,6 +799,11 @@ if __name__ == "__main__":
         exit(-1)
 
     directory = args.output_dir
+    customer_info_file = args.customer_info or os.path.join(os.path.dirname(interaction_data_file),
+                                                            "customer_information.csv")
+    if not os.path.exists(customer_info_file):
+        print(f"WARNING: {customer_info_file} not found: SVR@k and suitability-filtered metrics are skipped.")
+        customer_info_file = None
     months_term = args.months
     model = args.model
     params = args.params
@@ -906,6 +931,10 @@ if __name__ == "__main__":
         # We compute the profitability and volatility.
         profitability_df = compute_profitability(splitted_data.time_series, rec_date, future_date, None)
         volatility_df = compute_volatility(splitted_data.time_series, rec_date, future_date)
+        # Built before KPIEvaluationMetric pads profitability_df with zeros for unpriced assets.
+        extra_metrics = risk_metrics(splitted_data, rec_date, future_date, dict(profitability_df),
+                                     customer_info_file, args.risk_free,
+                                     prev_date=def_dates[i - 1] if i > 0 else None)
 
         # Define the metrics
         metrics = [
@@ -916,6 +945,7 @@ if __name__ == "__main__":
                                                         (future_date - rec_date).days)),
             ("volatility", KPIEvaluationMetric(splitted_data, volatility_df)),
             ("ndcg", PureNDCG(splitted_data))]
+        metrics += extra_metrics
 
         # Now, we choose metrics:
         print("Executing algorithm: " + model + " Start date: " + str(rec_date) + " End date: " + str(future_date))
@@ -928,7 +958,7 @@ if __name__ == "__main__":
 
         # Drop this window's data/algorithm objects before the next window builds
         # its own — see _release_gpu_memory() for why this matters for tabpfn.
-        del splitted_data, profitability_df, volatility_df, metrics
+        del splitted_data, profitability_df, volatility_df, metrics, extra_metrics
         _release_gpu_memory()
 
     wandb.finish()
