@@ -225,11 +225,12 @@ counterfactuals_results/rfr_n-100_kpi-full_short_internal_kpis_local
 trustworthiness_eval/privacy/membership_inference/results/
 trustworthiness_eval/outputs/**/*by_date*/
 
-trustworthiness_eval/privacy/membership_inference/results/   # 6 GB attack results
-trustworthiness_eval/outputs/**/*by_date*/                   # per-date resume caches
-far-trans/                                                   # copy of the upstream FAR-Trans repo, not used
-stats/plots/holdings_inference/                              # old holdings plots (rfr_n-100)
-stats/plots/membership_inference/ 
+# Copy of the upstream FAR-Trans repo, not used
+far-trans/
+
+# Generated plots and counterfactual analysis figures
+stats/plots
+stats/cf_analysis
 
 # Weights & Biases local run logs
 wandb/
